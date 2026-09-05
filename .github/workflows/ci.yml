@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install ruff
+
+      - name: Lint with ruff
+        run: ruff check backend/
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: career_planning
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/career_planning
+      JWT_SECRET_KEY: ci-test-secret-key-not-for-production
+      APP_ENV: development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install fastapi uvicorn sse-starlette \
+            pydantic pydantic-settings email-validator \
+            sqlalchemy asyncpg alembic pgvector \
+            redis apscheduler \
+            python-jose[cryptography] passlib[bcrypt]==4.0.1 \
+            python-multipart loguru httpx \
+            pypdf2 python-docx pandas openpyxl \
+            langchain langchain-core langchain-community langchain-openai \
+            langgraph langsmith \
+            pytest pytest-asyncio pytest-cov
+
+      - name: Run database migrations
+        working-directory: backend
+        run: |
+          python -m alembic upgrade head
+
+      - name: Unit tests
+        working-directory: backend
+        run: |
+          python -m pytest tests/test_core/ -v --cov=app/core --cov-report=term-missing
+
+      - name: Integration tests
+        working-directory: backend
+        run: |
+          python -m pytest tests/test_api/ -v

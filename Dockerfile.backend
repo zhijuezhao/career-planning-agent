@@ -1,0 +1,18 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    fastapi uvicorn[standard] sse-starlette \
+    pydantic pydantic-settings \
+    sqlalchemy asyncpg alembic pgvector \
+    redis apscheduler \
+    python-jose[cryptography] passlib[bcrypt] \
+    python-multipart loguru httpx \
+    pypdf2 python-docx pandas openpyxl \
+    langchain langchain-core langchain-community langchain-openai \
+    langgraph langsmith
+
+COPY backend/ /app/backend/
+
+EXPOSE 8001
