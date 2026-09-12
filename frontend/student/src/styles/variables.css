@@ -43,6 +43,8 @@
   --space-5: 20px;
   --space-6: 24px;
   --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
 
   /* Transitions */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -53,6 +55,17 @@
 
   /* Typography */
   --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-display: 'Noto Serif SC', 'Songti SC', serif;
+
+  /* Stage accent colors (low saturation; stepper nodes & stage labels only) */
+  --c-stage-start: #64748b;
+  --c-stage-upload: #94a3b8;
+  --c-stage-parsing: #38bdf8;
+  --c-stage-jobs: #34d399;
+  --c-stage-matching: #fbbf24;
+  --c-stage-career: #a78bfa;
+  --c-stage-report: #fb7185;
+  --c-stage-done: #6366f1;
 
   /* Layout */
   --sidebar-width: 64px;
