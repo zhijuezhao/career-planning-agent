@@ -1,4 +1,4 @@
-import type { Router } from 'vue-router'
+import type { Router, RouteLocationNormalized } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getToken, TOKEN_KEY } from '../api/auth'
 import { STAGE_META } from '../constants/journey'
@@ -24,7 +24,7 @@ export function registerGuards(router: Router) {
 
     // 2) 已登录访问 /login /register /start（招待归位）：按后端 stage 定位
     if (token && (guestOnly || to.path === '/start')) {
-      await redirectToStage(next, token)
+      await redirectToStage(next, to)
       return
     }
 
@@ -34,12 +34,16 @@ export function registerGuards(router: Router) {
 
 async function redirectToStage(
   next: (arg?: unknown) => void,
-  _token: string,
+  to: RouteLocationNormalized,
 ) {
   try {
     const store = useJourneyStore()
     await store.fetchStatus()
     const route = STAGE_META[store.stage]?.route ?? '/start'
+    if (route === to.path) {
+      next()
+      return
+    }
     next({ path: route })
   } catch (err: any) {
     if (err?.response?.status === 401) {
