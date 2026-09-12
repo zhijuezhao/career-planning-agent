@@ -19,8 +19,8 @@ async function handleRegister() {
   loading.value = true
   try {
     await userStore.register(form.value.username, form.value.password, form.value.email || undefined)
-    ElMessage.success('注册成功，请登录')
-    router.push('/login')
+    ElMessage.success('注册成功，开始你的成长旅程')
+    router.push('/start')
   } catch {
     triggerShake()
   } finally {

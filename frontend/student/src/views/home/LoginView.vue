@@ -20,7 +20,8 @@ async function handleLogin() {
   try {
     await userStore.login(form.value.username, form.value.password)
     ElMessage.success('登录成功')
-    router.push('/')
+    const redirect = (router.currentRoute.value.query.redirect as string) || '/start'
+    router.push(redirect)
   } catch {
     triggerShake()
   } finally {
