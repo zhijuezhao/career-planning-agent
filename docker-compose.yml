@@ -32,6 +32,22 @@ services:
       timeout: 5s
       retries: 5
 
+  admin-frontend:
+    build:
+      context: ./frontend/admin
+      dockerfile: Dockerfile
+    container_name: career_admin_frontend
+    volumes:
+      - admin_frontend_dist:/app/dist
+
+  student-frontend:
+    build:
+      context: ./frontend/student
+      dockerfile: Dockerfile
+    container_name: career_student_frontend
+    volumes:
+      - student_frontend_dist:/app/dist
+
   nginx:
     image: nginx:alpine
     container_name: career_nginx
@@ -41,8 +57,12 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - admin_frontend_dist:/usr/share/nginx/html/admin:ro
+      - student_frontend_dist:/usr/share/nginx/html/student:ro
     depends_on:
       - backend
+      - admin-frontend
+      - student-frontend
 
   backend:
     build:
@@ -56,7 +76,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/career_planning
       REDIS_URL: redis://redis:6379/0
     ports:
-      - "8001:8001"
+      - "8002:8001"
     volumes:
       - ./backend:/app/backend
       - uploads:/app/uploads
@@ -72,3 +92,5 @@ volumes:
   pgdata:
   redisdata:
   uploads:
+  admin_frontend_dist:
+  student_frontend_dist:

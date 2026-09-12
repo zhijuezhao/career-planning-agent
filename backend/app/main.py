@@ -24,7 +24,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://localhost:3000"],
+        allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:5174"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -43,6 +43,25 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health_check():
         return {"status": "ok", "app": settings.app_name, "env": settings.app_env}
+
+    # Scheduler lifespan
+    from app.core.job_agent.scheduler.adaptive_scheduler import AdaptiveScheduler
+    from app.core.job_agent.scheduler.source_registry import SourceRegistry
+
+    scheduler = AdaptiveScheduler(registry=SourceRegistry())
+
+    @app.on_event("startup")
+    async def start_scheduler():
+        scheduler.start()
+        logger.info("Scheduler started on application startup")
+
+    @app.on_event("shutdown")
+    async def stop_scheduler():
+        scheduler.shutdown()
+        logger.info("Scheduler shutdown on application shutdown")
+
+    # Expose scheduler on app.state for access from routes
+    app.state.scheduler = scheduler
 
     logger.info("Application created | env={} | debug={}", settings.app_env, settings.is_development)
 

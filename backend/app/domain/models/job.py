@@ -22,6 +22,8 @@ class JobProfile(Base):
     career_path: Mapped[dict | None] = mapped_column(JSONB)
     transition_paths: Mapped[dict | None] = mapped_column(JSONB)
     requirement_intensity: Mapped[dict | None] = mapped_column(JSONB)
+    outlook: Mapped[dict | None] = mapped_column(JSONB)
+    summary: Mapped[str | None] = mapped_column(Text)
     source_data_ids: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

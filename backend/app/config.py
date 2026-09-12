@@ -33,9 +33,22 @@ class Settings(BaseSettings):
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     qwen_model: str = "qwen-plus"
 
+    # LLM - LongCat
+    longcat_api_key: str = ""
+    longcat_base_url: str = "https://api.longcat.chat/openai"
+    longcat_model: str = "LongCat-2.0"
+
     # Embedding - SiliconFlow
     siliconflow_api_key: str = ""
+    siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
     siliconflow_embedding_model: str = "Qwen/Qwen3-Embedding-8B"
+
+    # LLM Gateway
+    llm_default_model: str = "deepseek"
+    llm_fallback_order: str = "deepseek,qwen"
+    llm_temperature: float = 0.7
+    llm_max_tokens: int = 4096
+    llm_request_timeout: int = 60
 
     # LangSmith
     langchain_tracing_v2: bool = False
@@ -45,6 +58,14 @@ class Settings(BaseSettings):
     # File storage
     upload_dir: str = "./uploads"
     max_upload_size_mb: int = 10
+
+    # Resume parsing
+    resume_max_text_chars: int = 15000
+    resume_llm_model: str | None = None
+
+    # Web search - Tavily
+    tavily_api_key: str = ""
+    tavily_base_url: str = "https://api.tavily.com"
 
     @property
     def is_development(self) -> bool:

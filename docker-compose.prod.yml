@@ -1,0 +1,242 @@
+# Production Docker Compose Configuration
+# Usage: docker compose -f docker-compose.prod.yml up -d
+#
+# Prerequisites:
+#   1. Copy .env.production.example to .env and fill in real values
+#   2. Place SSL certificates in ./nginx/ssl/ (for HTTPS)
+#   3. Run: docker compose -f docker-compose.prod.yml up -d --build
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: career_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-career_planning}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - backend_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: career_redis
+    restart: always
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-${POSTGRES_PASSWORD}}
+    expose:
+      - "6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-${POSTGRES_PASSWORD}}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - backend_network
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    container_name: career_backend
+    restart: always
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-career_planning}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-${POSTGRES_PASSWORD}}@redis:6379/0
+    expose:
+      - "8001"
+    volumes:
+      - uploads:/app/uploads
+      - logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "cd /app/backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --workers 4 --proxy-headers --forwarded-allow-ips=*"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - backend_network
+      - frontend_network
+
+  admin-frontend:
+    build:
+      context: ./frontend/admin
+      dockerfile: Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    container_name: career_admin_frontend
+    volumes:
+      - admin_frontend_dist:/app/dist
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - frontend_network
+
+  student-frontend:
+    build:
+      context: ./frontend/student
+      dockerfile: Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    container_name: career_student_frontend
+    volumes:
+      - student_frontend_dist:/app/dist
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - frontend_network
+
+  nginx:
+    image: nginx:alpine
+    container_name: career_nginx
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d/default.prod.conf:/etc/nginx/conf.d/default.prod.conf:ro
+      - admin_frontend_dist:/usr/share/nginx/html/admin:ro
+      - student_frontend_dist:/usr/share/nginx/html/student:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - backend
+      - admin-frontend
+      - student-frontend
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - frontend_network
+
+  # Optional: Database backup service
+  # db-backup:
+  #   image: pgvector/pgvector:pg17
+  #   container_name: career_db_backup
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     POSTGRES_USER: ${POSTGRES_USER:-postgres}
+  #     POSTGRES_DB: ${POSTGRES_DB:-career_planning}
+  #   volumes:
+  #     - ./backups:/backups
+  #   command: >
+  #     sh -c "while true; do
+  #       pg_dump -U ${POSTGRES_USER:-postgres} -h postgres ${POSTGRES_DB:-career_planning} > /backups/backup_$$(date +%Y%m%d_%H%M%S).sql;
+  #       find /backups -name '*.sql' -mtime +7 -delete;
+  #       sleep 86400;
+  #     done"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   networks:
+  #     - backend_network
+
+volumes:
+  pgdata:
+    driver: local
+  redisdata:
+    driver: local
+  uploads:
+    driver: local
+  logs:
+    driver: local
+  admin_frontend_dist:
+    driver: local
+  student_frontend_dist:
+    driver: local
+  nginx_logs:
+    driver: local
+
+networks:
+  backend_network:
+    driver: bridge
+    internal: true
+  frontend_network:
+    driver: bridge

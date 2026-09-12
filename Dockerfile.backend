@@ -1,18 +1,39 @@
 FROM python:3.12-slim
 
+# Security: Create non-root user
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
+
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
+# Install Python dependencies (use Tsinghua mirror for reliability)
+RUN pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip install --no-cache-dir \
     fastapi uvicorn[standard] sse-starlette \
-    pydantic pydantic-settings \
+    pydantic pydantic-settings email-validator \
     sqlalchemy asyncpg alembic pgvector \
     redis apscheduler \
-    python-jose[cryptography] passlib[bcrypt] \
+    python-jose[cryptography] "passlib[bcrypt]" "bcrypt==4.0.1" \
     python-multipart loguru httpx \
     pypdf2 python-docx pandas openpyxl \
     langchain langchain-core langchain-community langchain-openai \
     langgraph langsmith
 
+# Copy application code
 COPY backend/ /app/backend/
 
+# Create necessary directories and set permissions
+RUN mkdir -p /app/uploads /app/logs && \
+    chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')" || exit 1
+
 EXPOSE 8001
+
+# Default command (can be overridden in docker-compose)
+CMD ["sh", "-c", "cd /app/backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --workers 4"]

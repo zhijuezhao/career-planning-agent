@@ -1,0 +1,71 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv/
+ENV/
+env/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+*.log
+logs/
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+
+# Documentation
+*.md
+docs/
+!README.md
+
+# Tests
+tests/
+backend/tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# CI
+.github/

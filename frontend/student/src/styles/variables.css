@@ -1,0 +1,71 @@
+:root {
+  /* Brand Colors */
+  --c-brand: #6366f1;
+  --c-brand-light: #818cf8;
+  --c-brand-lighter: #e0e7ff;
+  --c-brand-dark: #4f46e5;
+  --c-brand-gradient: linear-gradient(135deg, #6366f1, #8b5cf6);
+
+  /* Neutral Palette */
+  --c-bg: #f8fafc;
+  --c-bg-soft: #f1f5f9;
+  --c-bg-mute: #e2e8f0;
+  --c-surface: #ffffff;
+  --c-text-1: #0f172a;
+  --c-text-2: #475569;
+  --c-text-3: #94a3b8;
+
+  /* Semantic Colors */
+  --c-success: #22c55e;
+  --c-warning: #f59e0b;
+  --c-danger: #ef4444;
+  --c-info: #3b82f6;
+
+  /* Shadows */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.05);
+  --shadow-lift: 0 14px 28px rgba(0, 0, 0, 0.1), 0 6px 10px rgba(0, 0, 0, 0.06);
+
+  /* Border Radius */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-full: 9999px;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Transitions */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+
+  /* Typography */
+  --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+
+  /* Layout */
+  --sidebar-width: 64px;
+  --header-height: 64px;
+
+  /* Element Plus Override */
+  --el-color-primary: var(--c-brand);
+  --el-color-primary-light-3: var(--c-brand-light);
+  --el-color-primary-light-5: #a5b4fc;
+  --el-color-primary-light-7: #c7d2fe;
+  --el-color-primary-light-8: #ddd6fe;
+  --el-color-primary-light-9: var(--c-brand-lighter);
+  --el-color-primary-dark-2: var(--c-brand-dark);
+  --el-border-radius-base: var(--radius-sm);
+  --el-font-family: var(--font-sans);
+}

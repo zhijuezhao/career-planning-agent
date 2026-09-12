@@ -30,3 +30,15 @@ class UserResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class UserUpdate(BaseModel):
+    email: EmailStr | None = None
+    phone: str | None = Field(None, max_length=20)
+    role: str | None = Field(None, pattern=r"^(student|admin)$")
+    status: int | None = Field(None, ge=0, le=1)
+
+
+class UserListResponse(BaseModel):
+    total: int
+    items: list[UserResponse]
