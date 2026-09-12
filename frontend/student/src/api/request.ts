@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import { getToken, TOKEN_KEY } from './auth'
 
 const request = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api/v1',
@@ -22,7 +23,10 @@ request.interceptors.response.use(
   (error) => {
     const message = error.response?.data?.detail || '请求失败'
     if (error.response?.status === 401) {
-      localStorage.removeItem('access_token')
+      const existing = localStorage.getItem(TOKEN_KEY)
+      if (existing && getToken() === existing) {
+        localStorage.removeItem(TOKEN_KEY)
+      }
       if (!window.location.pathname.startsWith('/login') && !window.location.pathname.startsWith('/register')) {
         window.location.href = '/login'
       }

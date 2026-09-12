@@ -27,6 +27,16 @@ export interface TokenResponse {
   token_type: string
 }
 
+export const TOKEN_KEY = 'access_token'
+
+export function setToken(token: string) {
+  localStorage.setItem(TOKEN_KEY, token)
+}
+
+export function getToken(): string {
+  return localStorage.getItem(TOKEN_KEY) || ''
+}
+
 export const authApi = {
   login: (data: LoginParams) =>
     request.post<any, TokenResponse>('/auth/login', data),
