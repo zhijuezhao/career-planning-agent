@@ -14,6 +14,7 @@ async def _build_report(
     five_layers: dict,
     dimension_scoring: dict | None,
     basic_info: dict,
+    matching_results: dict | None = None,
 ) -> str:
     gateway = get_llm_gateway()
 

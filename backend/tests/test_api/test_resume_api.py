@@ -58,6 +58,7 @@ startxref
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert resp.status_code == 202
+    assert resp.json()["status"] == "parsed"
     return resp.json()["resume_id"]
 
 
@@ -95,10 +96,10 @@ def test_get_resume_not_found(client: TestClient, auth_token: str):
 
 def test_get_report_no_profile(client: TestClient, auth_token: str, uploaded_resume_id: int):
     resp = client.get(
-        f"/api/v1/resume/{uploaded_resume_id}/report",
+        f"/api/v1/resume/{uploaded_resume_id}/radar",
         headers={"Authorization": f"Bearer {auth_token}"},
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 200
 
 
 def test_latest_unauthorized(client: TestClient):

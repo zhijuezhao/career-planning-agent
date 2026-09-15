@@ -60,7 +60,7 @@ def test_upload_pdf_success(client: TestClient, auth_token: str):
     assert resp.status_code == 202
     data = resp.json()
     assert "resume_id" in data
-    assert data["status"] == "uploaded"
+    assert data["status"] == "parsed"
 
 
 def test_upload_non_pdf_rejected(client: TestClient, auth_token: str):

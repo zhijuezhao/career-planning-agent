@@ -7,7 +7,6 @@ class ResumeStatusResponse(BaseModel):
     resume_id: int
     status: str
     error_message: str | None = None
-    profile_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -20,7 +19,6 @@ class ResumeDetailResponse(BaseModel):
     status: str
     page_count: int | None = None
     parsed_data: dict
-    profile_id: int | None = None
     error_message: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -28,12 +26,10 @@ class ResumeDetailResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ReportResponse(BaseModel):
-    report_id: int
-    profile_id: int
-    target_job: str | None = None
-    report_content: dict | None = None
-    version: int
-    created_at: datetime
+class ResumeUploadResponse(BaseModel):
+    resume_id: int
+    status: str  # "parsed"
+    five_layers: dict | None = None
+    dimension_scoring: dict | None = None
 
     model_config = {"from_attributes": True}
