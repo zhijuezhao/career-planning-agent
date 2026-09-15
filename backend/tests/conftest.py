@@ -59,10 +59,7 @@ def authed_user(client):
 
 
 @pytest.fixture
-def db_session():
+async def db_session():
     """新开一个 async session（连 dev DB），供测试直接构造行。"""
-    session = async_session_factory()
-    try:
+    async with async_session_factory() as session:
         yield session
-    finally:
-        session.close()
