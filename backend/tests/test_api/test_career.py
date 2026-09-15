@@ -5,6 +5,8 @@ import pytest
 from app.main import app
 from fastapi.testclient import TestClient
 
+pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6")
+
 _ts = str(int(time.time()))
 
 

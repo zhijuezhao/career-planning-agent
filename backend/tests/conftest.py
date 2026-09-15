@@ -1,6 +1,8 @@
+import time
+
 import pytest
 from app.config import get_settings
-from app.infrastructure.database import get_db
+from app.infrastructure.database import async_session_factory, get_db
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -31,3 +33,36 @@ app.dependency_overrides[get_db] = override_get_db
 @pytest.fixture(scope="module")
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(scope="module")
+def authed_user(client):
+    """注册+登录一个唯一用户，设置 Bearer 头，返回 user 对象（含 id）。"""
+    uname = f"journey_{int(time.time() * 1000)}"
+    reg = client.post("/api/v1/auth/register", json={
+        "username": uname,
+        "password": "journey123",
+    })
+    assert reg.status_code == 201, reg.text
+    user = reg.json()
+    assert "id" in user
+
+    login = client.post("/api/v1/auth/login", json={
+        "username": uname,
+        "password": "journey123",
+    })
+    assert login.status_code == 200, login.text
+    token = login.json()["access_token"]
+
+    client.headers["Authorization"] = f"Bearer {token}"
+    return pytest.SimpleNamespace(id=user["id"], username=user["username"])
+
+
+@pytest.fixture
+def db_session():
+    """新开一个 async session（连 dev DB），供测试直接构造行。"""
+    session = async_session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
