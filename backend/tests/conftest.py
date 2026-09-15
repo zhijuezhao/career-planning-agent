@@ -1,6 +1,7 @@
 import time
 
 import pytest
+import pytest_asyncio
 from app.config import get_settings
 from app.infrastructure.database import async_session_factory, get_db
 from app.main import app
@@ -58,7 +59,7 @@ def authed_user(client):
     return pytest.SimpleNamespace(id=user["id"], username=user["username"])
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def db_session():
     """新开一个 async session（连 dev DB），供测试直接构造行。"""
     async with async_session_factory() as session:
