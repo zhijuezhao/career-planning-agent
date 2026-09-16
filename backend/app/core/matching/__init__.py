@@ -5,7 +5,6 @@ from app.core.matching.job_matcher import (
     get_dimension_scores,
     get_dimension_weights,
     match_user_to_jobs,
-    save_match_result,
     search_jobs_by_vector,
 )
 
@@ -16,6 +15,5 @@ __all__ = [
     "get_dimension_scores",
     "get_dimension_weights",
     "match_user_to_jobs",
-    "save_match_result",
     "search_jobs_by_vector",
 ]

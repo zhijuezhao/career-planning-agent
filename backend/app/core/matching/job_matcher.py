@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.domain.models.dimension_score import DimensionScore
 from app.domain.models.dimension_weight import DimensionWeight
 from app.domain.models.job import JobProfile
-from app.domain.models.report import JobMatch
+from app.domain.models.profile_snapshot import ProfileSnapshot
 from app.domain.models.vector import JobMatchEmbedding
 from app.infrastructure.database import async_session_factory
 
@@ -339,100 +339,26 @@ def compute_match_score(
     return round(final_score, 4), analysis
 
 
-async def save_match_result(
-    user_id: int,
-    profile_id: int,
-    job_profile_id: int,
-    match_score: float,
-    match_analysis: dict[str, Any],
-    session=None,
-) -> JobMatch | None:
-    """Save a match result to the database."""
-    own_session = session is None
-    if own_session:
-        session = async_session_factory()
-
-    try:
-        if own_session:
-            async with session:
-                return await _save_match(user_id, profile_id, job_profile_id, match_score, match_analysis, session)
-        return await _save_match(user_id, profile_id, job_profile_id, match_score, match_analysis, session)
-    except Exception as exc:
-        logger.warning("Failed to save match result | error={}", exc)
-        return None
+def _candidate_scores(snapshot: ProfileSnapshot) -> dict[str, float]:
+    """候选方六维分数：读快照冻结 JSON（不再查 DimensionScore candidate 行）"""
+    return dict(snapshot.six_dim_scores_json or {})
 
 
-async def _save_match(
-    user_id: int,
-    profile_id: int,
-    job_profile_id: int,
-    match_score: float,
-    match_analysis: dict[str, Any],
-    session,
-) -> JobMatch:
-    match = JobMatch(
-        user_id=user_id,
-        profile_id=profile_id,
-        job_profile_id=job_profile_id,
-        match_score=match_score,
-        match_analysis=match_analysis,
-    )
-    session.add(match)
-    await session.commit()
-    await session.refresh(match)
-    return match
-
-
-async def match_user_to_jobs(
-    user_id: int,
-    profile_id: int,
-    user_vector: list[float],
-    top_k: int = 10,
-    max_distance: float = 0.5,
-    session=None,
-) -> list[dict[str, Any]]:
-    """Full matching pipeline: search → score → rank → persist.
-
-    Args:
-        user_id: User ID.
-        profile_id: AbilityProfile ID.
-        user_vector: User profile embedding (1024-dim).
-        top_k: Number of top matches to return.
-        max_distance: Maximum cosine distance threshold.
-        session: Optional injected session.
-
-    Returns:
-        List of match results sorted by score (descending).
-    """
-    own_session = session is None
-    if own_session:
-        session = async_session_factory()
-
-    try:
-        if own_session:
-            async with session:
-                return await _match_pipeline(user_id, profile_id, user_vector, top_k, max_distance, session)
-        return await _match_pipeline(user_id, profile_id, user_vector, top_k, max_distance, session)
-    except Exception as exc:
-        logger.warning("Match pipeline failed | user_id={} | error={}", user_id, exc)
-        return []
-
-
-async def _match_pipeline(
-    user_id: int,
-    profile_id: int,
-    user_vector: list[float],
+async def _match_snapshot(
+    snapshot: ProfileSnapshot,
     top_k: int,
-    max_distance: float,
+    max_distance: float | None,
     session,
 ) -> list[dict[str, Any]]:
-    # Step 1: Vector search
-    hits = await _do_search(user_vector, top_k * 2, max_distance, session)
+    # Step 1: Vector search against job embeddings (R-5.3: pass through top_k)
+    hits = await search_jobs_by_vector(
+        list(snapshot.embedding), top_k=top_k, max_distance=max_distance, session=session
+    )
     if not hits:
         return []
 
-    # Step 2: Get user dimension scores
-    user_dim_scores = await _get_scores("candidate", profile_id, session)
+    # Step 2: User dimension scores come from the snapshot's frozen JSON
+    user_dims = _candidate_scores(snapshot)
 
     # Step 3: Score each hit
     results: list[dict[str, Any]] = []
@@ -440,22 +366,20 @@ async def _match_pipeline(
         job_profile_id = hit["job_profile_id"]
         distance = hit["distance"]
 
-        # Get job dimension scores
-        job_dim_scores = await _get_scores("job", job_profile_id, session)
+        # Job dimension scores (job side still reads DimensionScore job rows)
+        job_dims = await get_dimension_scores("job", job_profile_id, session=session)
 
-        # Get job category for weights
+        # Per-hit job-industry weights (R-5.1)
         job_result = await session.execute(
             select(JobProfile.industry).where(JobProfile.id == job_profile_id)
         )
         job_industry = job_result.scalar_one_or_none() or "技术研发岗"
-
-        # Get weights
-        weights = await _get_weights(job_industry, session)
+        weights = await get_dimension_weights(job_industry, session=session)
         if not weights:
-            weights = {dim: 1.0 for dim in user_dim_scores}
+            weights = {dim: 1.0 for dim in user_dims}
 
         # Compute score
-        score, analysis = compute_match_score(distance, user_dim_scores, job_dim_scores, weights)
+        score, analysis = compute_match_score(distance, user_dims, job_dims, weights)
 
         results.append({
             "job_profile_id": job_profile_id,
@@ -467,8 +391,43 @@ async def _match_pipeline(
     # Sort by score descending
     results.sort(key=lambda x: x["match_score"], reverse=True)
 
-    # Persist top matches
-    for r in results[:top_k]:
-        await _save_match(user_id, profile_id, r["job_profile_id"], r["match_score"], r["analysis"], session)
-
     return results[:top_k]
+
+
+async def match_user_to_jobs(
+    user_id: int,
+    snapshot: ProfileSnapshot,
+    top_k: int = 10,
+    max_distance: float = 0.5,
+    session=None,
+) -> list[dict[str, Any]]:
+    """Read-only matching pipeline: search → score → rank.
+
+    Args:
+        user_id: User ID.
+        snapshot: ProfileSnapshot with frozen embedding + six-dim scores.
+        top_k: Number of top matches to return.
+        max_distance: Maximum cosine distance threshold.
+        session: Optional injected session.
+
+    Returns:
+        List of match results sorted by score (descending). No DB writes.
+    """
+    user_vector = snapshot.embedding
+    if not user_vector or all(v == 0.0 for v in user_vector):
+        # R-5.6: all-zero vector (embedding fallback) is treated as no-match;
+        # a null vector would otherwise rank NaN on the populated embedding table.
+        return []
+
+    own_session = session is None
+    if own_session:
+        session = async_session_factory()
+
+    try:
+        if own_session:
+            async with session:
+                return await _match_snapshot(snapshot, top_k, max_distance, session)
+        return await _match_snapshot(snapshot, top_k, max_distance, session)
+    except Exception as exc:
+        logger.warning("Match pipeline failed | user_id={} | error={}", user_id, exc)
+        return []
