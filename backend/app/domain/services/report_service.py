@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from uuid import uuid4
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.llm.gateway import get_llm_gateway
-from app.core.llm.prompts.career_development import build_career_development_messages
-from app.core.safety.filter import append_disclaimer
-from app.domain.models.report import CareerReport
+from app.domain.models.profile_snapshot import ProfileSnapshot
+from app.domain.models.report_record import ReportRecord
 from app.infrastructure.database import async_session_factory
 
 REPORTS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "output", "reports")
@@ -36,60 +35,187 @@ def _safe_json_loads(text: str) -> dict[str, Any]:
         return {}
 
 
+# ── 新链：records + 惰性 Word ──────────────────────────────────────────────────
+
+
+async def _latest_snapshot(db: AsyncSession, user_id: int) -> ProfileSnapshot | None:
+    """用户最新快照；有 matched_at 的（已匹配）优先。"""
+    stmt = (
+        select(ProfileSnapshot)
+        .where(ProfileSnapshot.user_id == user_id)
+        .order_by(
+            ProfileSnapshot.matched_at.is_not(None).desc(),
+            ProfileSnapshot.created_at.desc(),
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def next_version(user_id: int, db: AsyncSession) -> int:
+    """用户下一报告版本号 = 现有记录数 + 1。"""
+    cnt = (
+        await db.execute(
+            select(func.count())
+            .select_from(ReportRecord)
+            .where(ReportRecord.user_id == user_id)
+        )
+    ).scalar_one()
+    return cnt + 1
+
+
+async def record_version(record_id: int, user_id: int, db: AsyncSession) -> int:
+    """该用户记录按 id 升序的序号，即导出版本号（与创建时 next_version 一致）。"""
+    cnt = (
+        await db.execute(
+            select(func.count())
+            .select_from(ReportRecord)
+            .where(ReportRecord.user_id == user_id, ReportRecord.id <= record_id)
+        )
+    ).scalar_one()
+    return cnt
+
+
+async def _build_report_modern(snapshot: ProfileSnapshot, matching_results) -> str:
+    """统一 6 模块报告文本：走 resume_agent 的 builder（唯一实现）。"""
+    from app.core.resume_agent.tools.report_builder import _build_report
+
+    five = snapshot.five_layers_json or {}
+    dims = snapshot.six_dim_scores_json or {}
+    basic = (snapshot.form_raw_json or {}).get("basic_info") or {}
+    return await _build_report(five, dims, basic, matching_results)
+
+
+async def create_report_record(
+    user_id: int,
+    snapshot: ProfileSnapshot,
+    matching_results,
+    db: AsyncSession,
+) -> ReportRecord:
+    """落一条 ReportRecord：文本经 _build_report_modern，version = 次版本 + 1。"""
+    assert snapshot.user_id == user_id, "快照不属于该用户"
+    text = await _build_report_modern(snapshot, matching_results)
+    version = await next_version(user_id, db)
+    row = ReportRecord(
+        user_id=user_id,
+        profile_snapshot_id=snapshot.id,
+        serial_no=uuid.uuid4(),
+        description=f"第{version}版",
+        report_text=text,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    logger.info("Report record created | user_id={} | record_id={} | version={}",
+                user_id, row.id, version)
+    return row
+
+
+async def ensure_report_word(report: ReportRecord, db: AsyncSession) -> str | None:
+    """惰性 Word：已有路径且文件存在 → 直接返回；否则现场生成 + 落库。"""
+    if report.word_file_path and os.path.exists(report.word_file_path):
+        return report.word_file_path
+    _ensure_reports_dir()
+    out = os.path.join(REPORTS_DIR, f"{report.serial_no}.docx")
+    generate_word_document({"report_text": report.report_text}, out)
+    report.word_file_path = out
+    await db.commit()
+    logger.info("Report word generated | record_id={} | path={}", report.id, out)
+    return out
+
+
+# ── 兼容壳：app/core/agent/tools/report_tool.py 依赖 create_report（保持不编辑）──
+
+
+@dataclass
+class _CompatReportView:
+    """create_report 兼容返回视图：暴露工具读取的 5 个属性，不污染 ORM 行。"""
+    id: int
+    version: int
+    target_job: str | None
+    word_file_path: str | None
+    report_content: dict
+
+
+async def create_report(
+    user_id: int,
+    profile_id: int,
+    target_job: str | None = None,
+    session=None,
+) -> _CompatReportView:
+    """兼容旧链 create_report：解析用户最新快照 → 落 ReportRecord（空匹配上下文）。
+
+    report_tool.generate_career_report 以 (user_id, profile_id, target_job, session)
+    调用并读取 .id/.version/.target_job/.word_file_path/.report_content.get("report_text")。
+    """
+    own_session = session is None
+    if own_session:
+        session = async_session_factory()
+
+    try:
+        if own_session:
+            async with session:
+                return await _create_report_compat(user_id, profile_id, target_job, session)
+        return await _create_report_compat(user_id, profile_id, target_job, session)
+    except Exception as exc:
+        logger.warning("Failed to create report | error={}", exc)
+        raise
+
+
+async def _create_report_compat(
+    user_id: int,
+    profile_id: int,
+    target_job: str | None,
+    session: AsyncSession,
+) -> _CompatReportView:
+    snapshot = await _latest_snapshot(session, user_id)
+    if snapshot is None:
+        raise ValueError("用户能力画像不存在")
+    # Tool 路径无实时匹配结果 —— 空列表（报告文本带空匹配上下文生成）
+    record = await create_report_record(user_id, snapshot, matching_results=[], db=session)
+    return _CompatReportView(
+        id=record.id,
+        version=await record_version(record.id, user_id, session),
+        target_job=target_job,
+        word_file_path=record.word_file_path,
+        report_content={"report_text": record.report_text},
+    )
+
+
+# ── 兼容壳：旧 5 名字（report_tool 祖父链/旧测试 import 用，永不触已删表）────────
+
+
 async def get_user_profile_data(
     user_id: int,
     profile_id: int,
     session: AsyncSession,
 ) -> dict[str, Any] | None:
-    """获取用户能力画像数据。"""
-    from app.domain.models.profile import AbilityProfile
-
-    result = await session.execute(
-        select(AbilityProfile).where(AbilityProfile.id == profile_id)
-    )
-    profile = result.scalar_one_or_none()
-    if not profile:
+    """旧链兼容：返回最新快照派生画像；无快照 → None。"""
+    snapshot = await _latest_snapshot(session, user_id)
+    if snapshot is None:
         return None
-
+    five = snapshot.five_layers_json or {}
+    form = snapshot.form_raw_json or {}
     return {
-        "direction_tag": profile.direction_tag,
-        "intention": profile.intention,
-        "traits": profile.traits,
-        "practice": profile.practice,
-        "soft_skills": profile.soft_skills,
-        "hard_skills": profile.hard_skills,
+        "direction_tag": (five.get("intention") or {}).get("direction_tag"),
+        "intention": five.get("intention") or {},
+        "traits": five.get("traits") or {},
+        "practice": five.get("practice") or {},
+        "soft_skills": five.get("soft_skills") or {},
+        "hard_skills": five.get("hard_skills") or {},
+        "basic_info": form.get("basic_info") or {},
     }
 
 
 async def get_dimension_scores_data(
     profile_id: int,
     session: AsyncSession,
-) -> dict[str, float]:
-    """获取维度评分数据。"""
-    from app.domain.models.dimension_score import DimensionScore
-
-    result = await session.execute(
-        select(DimensionScore).where(
-            DimensionScore.profile_type == "candidate",
-            DimensionScore.profile_id == profile_id,
-        )
-    )
-    scores = result.scalars().all()
-
-    dimension_scores: dict[str, float] = {}
-    for s in scores:
-        if s.sub_dimension == s.top_dimension or not s.sub_dimension:
-            dimension_scores[s.top_dimension] = s.score
-        else:
-            if s.top_dimension not in dimension_scores:
-                dimension_scores[s.top_dimension] = []
-            dimension_scores[s.top_dimension].append(s.score)
-
-    for key, val in dimension_scores.items():
-        if isinstance(val, list):
-            dimension_scores[key] = sum(val) / len(val) if val else 0.0
-
-    return dimension_scores
+) -> dict[str, Any]:
+    """旧链兼容：快照六维评分（1:1 约定 profile_id ≈ user）；无 → {}。"""
+    snapshot = await _latest_snapshot(session, profile_id)
+    if snapshot is None:
+        return {}
+    return snapshot.six_dim_scores_json or {}
 
 
 async def get_latest_match_results(
@@ -97,51 +223,26 @@ async def get_latest_match_results(
     session: AsyncSession,
     top_k: int = 5,
 ) -> list[dict[str, Any]]:
-    """获取最新匹配结果。"""
-    from app.domain.models.report import JobMatch
-
-    result = await session.execute(
-        select(JobMatch)
-        .where(JobMatch.user_id == user_id)
-        .order_by(JobMatch.match_score.desc())
-        .limit(top_k)
-    )
-    matches = result.scalars().all()
-
-    return [
-        {
-            "job_profile_id": m.job_profile_id,
-            "match_score": m.match_score,
-            "analysis": m.match_analysis,
-        }
-        for m in matches
-        if m.match_score is not None
-    ]
+    """旧链兼容：匹配结果不再落表，新链由 /reports/generate 显式传入 → 空列表。"""
+    return []
 
 
 async def get_latest_career_path(
     user_id: int,
     session: AsyncSession,
 ) -> dict[str, Any] | None:
-    """获取最新职业路线。"""
-    from app.domain.models.report import GrowthPath
-
-    result = await session.execute(
-        select(GrowthPath)
-        .where(GrowthPath.user_id == user_id)
-        .order_by(GrowthPath.created_at.desc())
-        .limit(1)
-    )
-    path = result.scalar_one_or_none()
-    if not path:
+    """旧链兼容：从最新快照派生目标岗位；无快照 → None。"""
+    snapshot = await _latest_snapshot(session, user_id)
+    if snapshot is None:
         return None
-
+    intention = (snapshot.form_raw_json or {}).get("intention") or {}
+    targets = intention.get("target_position") or []
     return {
-        "target_position": path.target_position,
-        "path_type": path.path_type,
-        "milestones": path.milestones,
-        "learning_resources": path.learning_resources,
-        "generated_plan": path.generated_plan,
+        "target_position": targets[0] if targets else None,
+        "path_type": None,
+        "milestones": [],
+        "learning_resources": {},
+        "generated_plan": {},
     }
 
 
@@ -149,73 +250,11 @@ async def get_latest_growth_plan(
     user_id: int,
     session: AsyncSession,
 ) -> dict[str, Any] | None:
-    """获取最新成长计划。"""
-    from app.domain.models.report import GrowthPlan
-
-    result = await session.execute(
-        select(GrowthPlan)
-        .where(GrowthPlan.user_id == user_id)
-        .order_by(GrowthPlan.created_at.desc())
-        .limit(1)
-    )
-    plan = result.scalar_one_or_none()
-    if not plan:
-        return None
-
-    return {
-        "cycle_weeks": plan.cycle_weeks,
-        "intensity": plan.intensity,
-        "tasks": plan.tasks,
-        "progress": plan.progress,
-    }
+    """旧链兼容：成长计划不再落表 → 安全空值 None。"""
+    return None
 
 
-async def generate_report_content(
-    user_id: int,
-    profile_id: int,
-    target_job: str | None,
-    session: AsyncSession,
-) -> dict[str, Any]:
-    """生成报告内容（调用 LLM）。"""
-    profile_data = await get_user_profile_data(user_id, profile_id, session)
-    if not profile_data:
-        raise ValueError("用户能力画像不存在")
-
-    dim_scores = await get_dimension_scores_data(profile_id, session)
-    match_results = await get_latest_match_results(user_id, session)
-    career_path = await get_latest_career_path(user_id, session)
-    growth_plan = await get_latest_growth_plan(user_id, session)
-
-    basic_info = {
-        "user_id": user_id,
-        "profile_id": profile_id,
-        "target_job": target_job,
-    }
-
-    messages = build_career_development_messages(
-        basic_info_json=json.dumps(basic_info, ensure_ascii=False, indent=2),
-        five_layers_json=json.dumps(profile_data, ensure_ascii=False, indent=2),
-        dimension_scores_json=json.dumps(dim_scores, ensure_ascii=False, indent=2),
-        match_results_json=json.dumps(match_results, ensure_ascii=False, indent=2),
-        career_path_json=json.dumps(career_path or {}, ensure_ascii=False, indent=2),
-        growth_plan_json=json.dumps(growth_plan or {}, ensure_ascii=False, indent=2),
-    )
-
-    gateway = get_llm_gateway()
-    response = await gateway.ainvoke(messages)
-    raw = response.content if isinstance(response.content, str) else str(response.content)
-    report_text = append_disclaimer(raw.strip())
-
-    return {
-        "basic_info": basic_info,
-        "five_layers": profile_data,
-        "dimension_scores": dim_scores,
-        "match_results": match_results,
-        "career_path": career_path,
-        "growth_plan": growth_plan,
-        "report_text": report_text,
-        "generated_at": datetime.utcnow().isoformat(),
-    }
+# ── Word 导出（原样保留）─────────────────────────────────────────────────────
 
 
 def generate_word_document(
@@ -265,88 +304,3 @@ def generate_word_document(
     doc.save(output_path)
     logger.info("Word document generated | path={}", output_path)
     return output_path
-
-
-async def create_report(
-    user_id: int,
-    profile_id: int,
-    target_job: str | None = None,
-    session=None,
-) -> CareerReport:
-    """创建生涯发展报告（生成内容 + Word 导出）。"""
-    own_session = session is None
-    if own_session:
-        session = async_session_factory()
-
-    try:
-        if own_session:
-            async with session:
-                return await _create_report_impl(user_id, profile_id, target_job, session)
-        return await _create_report_impl(user_id, profile_id, target_job, session)
-    except Exception as exc:
-        logger.warning("Failed to create report | error={}", exc)
-        raise
-
-
-async def _create_report_impl(
-    user_id: int,
-    profile_id: int,
-    target_job: str | None,
-    session: AsyncSession,
-) -> CareerReport:
-    report_content = await generate_report_content(
-        user_id, profile_id, target_job, session
-    )
-
-    _ensure_reports_dir()
-    filename = f"career_report_{user_id}_{uuid4().hex[:8]}.docx"
-    output_path = os.path.join(REPORTS_DIR, filename)
-    generate_word_document(report_content, output_path)
-
-    version_result = await session.execute(
-        select(CareerReport.version)
-        .where(CareerReport.user_id == user_id, CareerReport.profile_id == profile_id)
-        .order_by(CareerReport.version.desc())
-        .limit(1)
-    )
-    latest_version = version_result.scalar_one_or_none()
-    version = (latest_version or 0) + 1
-
-    report = CareerReport(
-        user_id=user_id,
-        profile_id=profile_id,
-        target_job=target_job,
-        report_content=report_content,
-        word_file_path=output_path,
-        version=version,
-    )
-    session.add(report)
-    await session.commit()
-    await session.refresh(report)
-    logger.info("Report created | user_id={} | report_id={}", user_id, report.id)
-    return report
-
-
-async def get_user_reports(
-    user_id: int,
-    session: AsyncSession,
-    skip: int = 0,
-    limit: int = 20,
-) -> list[CareerReport]:
-    """获取用户的报告列表。"""
-    result = await session.execute(
-        select(CareerReport)
-        .where(CareerReport.user_id == user_id)
-        .order_by(CareerReport.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-    )
-    return list(result.scalars().all())
-
-
-async def get_report_by_id(
-    report_id: int,
-    session: AsyncSession,
-) -> CareerReport | None:
-    """获取单个报告。"""
-    return await session.get(CareerReport, report_id)

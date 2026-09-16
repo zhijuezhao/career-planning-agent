@@ -14,7 +14,7 @@ async def _build_report(
     five_layers: dict,
     dimension_scoring: dict | None,
     basic_info: dict,
-    matching_results: dict | None = None,
+    matching_results: list[dict] | None = None,
 ) -> str:
     gateway = get_llm_gateway()
 
@@ -24,6 +24,7 @@ async def _build_report(
             dimension_scoring or {}, ensure_ascii=False, indent=2
         ),
         basic_info_json=json.dumps(basic_info, ensure_ascii=False, indent=2),
+        matching_results_json=json.dumps(matching_results or [], ensure_ascii=False, indent=2),
     )
 
     response = await gateway.ainvoke(messages)
