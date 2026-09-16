@@ -63,7 +63,12 @@ async def generate_report(
             detail="matching_results 必须恰为 3 项 {job_profile_id, match_score}",
         )
 
-    rec = await create_report_record(user.id, snap, body.matching_results, db)
+    rec = await create_report_record(
+        user.id,
+        snap,
+        [m.model_dump() for m in body.matching_results],
+        db,
+    )
     return ReportRecordResponse(
         id=rec.id,
         user_id=rec.user_id,
