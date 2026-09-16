@@ -83,64 +83,54 @@ def _create_user(client: TestClient, username: str) -> int:
 
 class TestMatchResultsAPI:
     def test_list_match_results(self, admin_token: str, client: TestClient):
-        """Test listing match results."""
+        """Test listing match results (501: depends on deleted JobMatch table)."""
         resp = client.get(
             "/api/v1/admin/matching/results",
             headers={"Authorization": f"Bearer {admin_token}"},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "total" in data
-        assert "items" in data
+        assert resp.status_code == 501
 
     def test_filter_match_results_by_user(self, admin_token: str, client: TestClient):
-        """Test filtering match results by user_id."""
+        """Test filtering match results by user_id (501: deleted JobMatch table)."""
         resp = client.get(
             "/api/v1/admin/matching/results?user_id=1",
             headers={"Authorization": f"Bearer {admin_token}"},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert all(item["user_id"] == 1 for item in data["items"])
+        assert resp.status_code == 501
 
     def test_get_match_result_not_found(self, admin_token: str, client: TestClient):
-        """Test getting a non-existent match result."""
+        """Test getting a non-existent match result (501: deleted JobMatch table)."""
         resp = client.get(
             "/api/v1/admin/matching/results/999999",
             headers={"Authorization": f"Bearer {admin_token}"},
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 501
 
 
 class TestFeedbacksAPI:
     def test_list_feedbacks(self, admin_token: str, client: TestClient):
-        """Test listing feedbacks."""
+        """Test listing feedbacks (501: depends on deleted UserFeedback table)."""
         resp = client.get(
             "/api/v1/admin/matching/feedbacks",
             headers={"Authorization": f"Bearer {admin_token}"},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "total" in data
-        assert "items" in data
+        assert resp.status_code == 501
 
     def test_filter_feedbacks_by_type(self, admin_token: str, client: TestClient):
-        """Test filtering feedbacks by type."""
+        """Test filtering feedbacks by type (501: deleted UserFeedback table)."""
         resp = client.get(
             "/api/v1/admin/matching/feedbacks?feedback_type=like",
             headers={"Authorization": f"Bearer {admin_token}"},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert all(item["feedback_type"] == "like" for item in data["items"])
+        assert resp.status_code == 501
 
     def test_get_feedback_not_found(self, admin_token: str, client: TestClient):
-        """Test getting a non-existent feedback."""
+        """Test getting a non-existent feedback (501: deleted UserFeedback table)."""
         resp = client.get(
             "/api/v1/admin/matching/feedbacks/999999",
             headers={"Authorization": f"Bearer {admin_token}"},
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 501
 
 
 class TestDimensionWeightsAPI:

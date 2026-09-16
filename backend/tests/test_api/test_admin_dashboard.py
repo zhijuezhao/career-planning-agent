@@ -91,16 +91,12 @@ class TestDashboardAPI:
         assert isinstance(data, list)
 
     def test_match_stats(self, admin_token: str, client: TestClient):
-        """Test match stats endpoint."""
+        """Test match stats endpoint (501: depends on deleted JobMatch table)."""
         resp = client.get(
             "/api/v1/admin/dashboard/match-stats",
             headers={"Authorization": f"Bearer {admin_token}"},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "avg_score" in data
-        assert "total_matches" in data
-        assert "feedback_count" in data
+        assert resp.status_code == 501
 
     def test_system_health(self, admin_token: str, client: TestClient):
         """Test system health endpoint."""

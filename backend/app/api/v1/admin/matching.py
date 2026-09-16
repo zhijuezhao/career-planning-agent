@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
 from app.domain.models.dimension_weight import DimensionWeight
-from app.domain.models.report import JobMatch, UserFeedback
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
@@ -36,26 +35,7 @@ async def list_match_results(
     db: AsyncSession = Depends(get_db),
 ):
     """List match results with optional filtering."""
-    query = select(JobMatch)
-    count_query = select(func.count()).select_from(JobMatch)
-
-    if user_id is not None:
-        query = query.where(JobMatch.user_id == user_id)
-        count_query = count_query.where(JobMatch.user_id == user_id)
-    if min_score is not None:
-        query = query.where(JobMatch.match_score >= min_score)
-        count_query = count_query.where(JobMatch.match_score >= min_score)
-
-    total = (await db.execute(count_query)).scalar() or 0
-
-    query = query.order_by(JobMatch.id.desc()).offset(skip).limit(limit)
-    result = await db.execute(query)
-    items = result.scalars().all()
-
-    return MatchResultListResponse(
-        total=total,
-        items=[MatchResultResponse.model_validate(i) for i in items],
-    )
+    raise HTTPException(status_code=501, detail="匹配结果/反馈管理依赖已删的 JobMatch/UserFeedback 表，暂不提供")
 
 
 @router.get("/results/{match_id}", response_model=MatchResultResponse)
@@ -65,10 +45,7 @@ async def get_match_result(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a single match result by ID."""
-    match = await db.get(JobMatch, match_id)
-    if match is None:
-        raise HTTPException(status_code=404, detail="Match result not found")
-    return match
+    raise HTTPException(status_code=501, detail="匹配结果/反馈管理依赖已删的 JobMatch/UserFeedback 表，暂不提供")
 
 
 @router.delete("/results/{match_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -78,12 +55,7 @@ async def delete_match_result(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a match result."""
-    match = await db.get(JobMatch, match_id)
-    if match is None:
-        raise HTTPException(status_code=404, detail="Match result not found")
-
-    await db.delete(match)
-    await db.flush()
+    raise HTTPException(status_code=501, detail="匹配结果/反馈管理依赖已删的 JobMatch/UserFeedback 表，暂不提供")
 
 
 # ── Feedbacks ───────────────────────────────────────────────────────────────
@@ -99,26 +71,7 @@ async def list_feedbacks(
     db: AsyncSession = Depends(get_db),
 ):
     """List user feedbacks with optional filtering."""
-    query = select(UserFeedback)
-    count_query = select(func.count()).select_from(UserFeedback)
-
-    if user_id is not None:
-        query = query.where(UserFeedback.user_id == user_id)
-        count_query = count_query.where(UserFeedback.user_id == user_id)
-    if feedback_type:
-        query = query.where(UserFeedback.feedback_type == feedback_type)
-        count_query = count_query.where(UserFeedback.feedback_type == feedback_type)
-
-    total = (await db.execute(count_query)).scalar() or 0
-
-    query = query.order_by(UserFeedback.id.desc()).offset(skip).limit(limit)
-    result = await db.execute(query)
-    items = result.scalars().all()
-
-    return FeedbackListResponse(
-        total=total,
-        items=[FeedbackResponse.model_validate(i) for i in items],
-    )
+    raise HTTPException(status_code=501, detail="匹配结果/反馈管理依赖已删的 JobMatch/UserFeedback 表，暂不提供")
 
 
 @router.get("/feedbacks/{feedback_id}", response_model=FeedbackResponse)
@@ -128,10 +81,7 @@ async def get_feedback(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a single feedback by ID."""
-    feedback = await db.get(UserFeedback, feedback_id)
-    if feedback is None:
-        raise HTTPException(status_code=404, detail="Feedback not found")
-    return feedback
+    raise HTTPException(status_code=501, detail="匹配结果/反馈管理依赖已删的 JobMatch/UserFeedback 表，暂不提供")
 
 
 # ── Dimension Weights ───────────────────────────────────────────────────────

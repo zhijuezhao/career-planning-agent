@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6")
+pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6；工具已删（match_jobs_tool/career_path_tool 已随 Task 0 admin 清理删除）")
 
 
 class TestMatchJobsTool:

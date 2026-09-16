@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
 from app.domain.models.job import JobProfile, JobRawData
-from app.domain.models.report import CareerReport, ChatSession, JobMatch, UserFeedback
+from app.domain.models.report import ChatSession
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
@@ -43,12 +43,6 @@ async def dashboard_overview(
     # Total job profiles
     job_count = (await db.execute(select(func.count()).select_from(JobProfile))).scalar() or 0
 
-    # Total matches
-    match_count = (await db.execute(select(func.count()).select_from(JobMatch))).scalar() or 0
-
-    # Total reports
-    report_count = (await db.execute(select(func.count()).select_from(CareerReport))).scalar() or 0
-
     # Total chat sessions
     chat_count = (await db.execute(select(func.count()).select_from(ChatSession))).scalar() or 0
 
@@ -56,8 +50,8 @@ async def dashboard_overview(
         total_users=user_count,
         total_resumes=resume_count,
         total_job_profiles=job_count,
-        total_matches=match_count,
-        total_reports=report_count,
+        total_matches=0,
+        total_reports=0,
         total_chat_sessions=chat_count,
     )
 
@@ -139,24 +133,7 @@ async def match_stats(
     db: AsyncSession = Depends(get_db),
 ):
     """Get matching statistics."""
-    # Average match score
-    avg_score = (
-        await db.execute(
-            select(func.avg(JobMatch.match_score)).where(JobMatch.match_score.isnot(None))
-        )
-    ).scalar() or 0.0
-
-    # Total matches
-    total_matches = (await db.execute(select(func.count()).select_from(JobMatch))).scalar() or 0
-
-    # Feedback count
-    feedback_count = (await db.execute(select(func.count()).select_from(UserFeedback))).scalar() or 0
-
-    return MatchStats(
-        avg_score=round(float(avg_score), 4),
-        total_matches=total_matches,
-        feedback_count=feedback_count,
-    )
+    raise HTTPException(status_code=501, detail="匹配统计依赖已删的 JobMatch 表，暂不提供")
 
 
 @router.get("/system-health", response_model=SystemHealth)

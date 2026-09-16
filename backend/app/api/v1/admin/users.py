@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
-from app.domain.models.report import CareerReport, ChatSession, JobMatch
+from app.domain.models.report import ChatSession
 from app.domain.models.resume import Resume
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
@@ -85,14 +85,6 @@ async def get_user_stats(
         select(func.count()).select_from(Resume).where(Resume.user_id == user_id)
     )).scalar() or 0
 
-    match_count = (await db.execute(
-        select(func.count()).select_from(JobMatch).where(JobMatch.user_id == user_id)
-    )).scalar() or 0
-
-    report_count = (await db.execute(
-        select(func.count()).select_from(CareerReport).where(CareerReport.user_id == user_id)
-    )).scalar() or 0
-
     chat_session_count = (await db.execute(
         select(func.count()).select_from(ChatSession).where(ChatSession.user_id == user_id)
     )).scalar() or 0
@@ -101,8 +93,8 @@ async def get_user_stats(
         user_id=user.id,
         username=user.username,
         resume_count=resume_count,
-        match_count=match_count,
-        report_count=report_count,
+        match_count=0,
+        report_count=0,
         chat_session_count=chat_session_count,
     )
 

@@ -2,19 +2,34 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6")
+pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6；工具已删（path_planner 已随 Task 0 admin 清理删除）")
 
-from app.core.matching.path_planner import (
-    _safe_json_loads,
-    generate_career_path,
-    generate_growth_plan,
-    get_career_paths,
-    get_dimension_scores_map,
-    get_growth_plans,
-    get_target_job,
-)
+try:
+    from app.core.matching.path_planner import (
+        _safe_json_loads,
+        generate_career_path,
+        generate_growth_plan,
+        get_career_paths,
+        get_dimension_scores_map,
+        get_growth_plans,
+        get_target_job,
+    )
+except ImportError:
+    _safe_json_loads = None
+    generate_career_path = None
+    generate_growth_plan = None
+    get_career_paths = None
+    get_dimension_scores_map = None
+    get_growth_plans = None
+    get_target_job = None
+
 from app.domain.models.job import JobProfile
-from app.domain.models.report import GrowthPath, GrowthPlan
+
+try:
+    from app.domain.models.report import GrowthPath, GrowthPlan
+except ImportError:
+    GrowthPath = None
+    GrowthPlan = None
 
 
 class TestSafeJsonLoads:
