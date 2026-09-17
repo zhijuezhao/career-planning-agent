@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6")
+pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6；matching_service 仅存 run_matching，历史符号已删")
 
 from app.domain.services.chat_service import (
     create_chat_session,
@@ -17,13 +17,10 @@ from app.domain.services.chat_service import (
     get_chat_messages,
     save_chat_message,
 )
-from app.domain.services.matching_service import (
-    get_user_vector,
-    get_match_history,
-    create_feedback,
-    get_user_feedbacks,
-)
-from app.schemas.matching import FeedbackCreateRequest
+try:
+    from app.schemas.matching import FeedbackCreateRequest
+except ImportError:  # pragma: no cover
+    FeedbackCreateRequest = None
 
 
 def asyncio_run(coro):

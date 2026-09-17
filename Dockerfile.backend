@@ -15,7 +15,7 @@ RUN pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
     redis apscheduler \
     python-jose[cryptography] "passlib[bcrypt]" "bcrypt==4.0.1" \
     python-multipart loguru httpx \
-    pypdf2 python-docx pandas openpyxl \
+    pypdf2 python-docx pandas openpyxl pdfplumber beautifulsoup4 \
     langchain langchain-core langchain-community langchain-openai \
     langgraph langsmith
 

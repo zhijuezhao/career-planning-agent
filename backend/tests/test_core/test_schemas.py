@@ -24,10 +24,11 @@ from app.schemas.admin import (
     AIConfigUpdate,
 )
 from app.schemas.chat import ChatSessionCreate, ChatRequest
-from app.schemas.matching import (
-    MatchRunRequest,
-    FeedbackCreateRequest,
-)
+try:
+    from app.schemas.matching import MatchRunRequest, FeedbackCreateRequest
+except ImportError:  # pragma: no cover
+    MatchRunRequest = None
+    FeedbackCreateRequest = None
 from app.schemas.reports import ReportGenerateRequest
 from app.schemas.career import CareerPathRequest, GrowthPlanRequest
 
