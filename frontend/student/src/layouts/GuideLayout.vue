@@ -23,11 +23,11 @@ const nextText = computed(() => {
 })
 const canAdvance = computed(() => {
   // 每步自检由页面组件调用 journey.setGuideStep(nextKey) 达成；此处只按 store 顺序放行
-  // 方案 (b)：store 前端本地 guideStep ≥ 本步 -> 可进一步
+  // 方案 (b)：store 前端本地 guideStep ≥ 本步 -> 可进一步（按步骤索引比较，见 R-9.5）
   const next = nextStep.value
   if (!next) return true                                   // 最后一步（生成报告页）：按钮常亮
-  if (journey.guideStep === 'done') return true            // 已走完旅程
-  return journey.guideStep === next.key                    // 已完成下一步的页面自检
+  const doneIndex = GUIDE_STEPS.findIndex(s => s.key === journey.guideStep)
+  return doneIndex >= currentIndex.value + 1               // 已走完本步（或更远）才放行
 })
 
 function advance() {
