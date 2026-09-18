@@ -1,51 +1,52 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRoute } from 'vue-router'
-import { GUIDE_STEP_MAP, GUIDE_STEPS } from '@/constants/journey'
+import { useRoute, useRouter } from 'vue-router'
+import { GUIDE_STEPS, GUIDE_STEP_MAP } from '@/constants/journey'
 import type { GuideStep } from '@/api/journey'
 import { useJourneyStore } from '@/stores/journey'
 import { useUserStore } from '@/stores/user'
-import JourneyStepper from '@/components/JourneyStepper.vue'
+import GuideProgressBar from '@/components/GuideProgressBar.vue'
 
 const route = useRoute()
+const router = useRouter()
 const journey = useJourneyStore()
 const userStore = useUserStore()
 
-const STAGE_KEYS: GuideStep[] = ['resume', 'parse', 'match', 'career', 'done']
-
-const currentStageKey = computed<GuideStep>(() => {
-  const s = route.meta.guide as GuideStep | undefined
-  return s ?? 'resume'
+const currentStep = computed<GuideStep>(() => (route.meta.guide as GuideStep) ?? 'resume')
+const currentIndex = computed(() => GUIDE_STEPS.findIndex(s => s.key === currentStep.value))
+const nextStep = computed(() =>
+  currentIndex.value >= GUIDE_STEPS.length - 1 ? null : GUIDE_STEPS[currentIndex.value + 1])
+const headerText = computed(() => `我在 ${GUIDE_STEP_MAP[currentStep.value].title}`)
+const nextText = computed(() => {
+  if (currentIndex.value >= GUIDE_STEPS.length - 1) return '旅程已完成，生成报告'
+  return `下一步：${GUIDE_STEPS[currentIndex.value + 1].label}`
 })
-const currentIndex = computed(() => GUIDE_STEP_MAP[currentStageKey.value].stepperIndex)
-
-const stepperItems = computed(() =>
-  STAGE_KEYS.map(key => ({
-    label: GUIDE_STEP_MAP[key].label,
-    state: (GUIDE_STEP_MAP[key].stepperIndex < currentIndex.value
-      ? 'done'
-      : GUIDE_STEP_MAP[key].stepperIndex === currentIndex.value
-        ? 'current'
-        : 'locked') as 'done' | 'current' | 'locked',
-  })),
-)
-
-const headerText = computed(() => `我在 ${GUIDE_STEP_MAP[currentStageKey.value].title}`)
-
-const nextStageText = computed(() => {
-  const idx = GUIDE_STEP_MAP[currentStageKey.value].stepperIndex
-  if (idx >= GUIDE_STEPS.length - 1) return '引导已完成'
-  return `下一步：${GUIDE_STEPS[idx + 1].label}`
+const canAdvance = computed(() => {
+  // 每步自检由页面组件调用 journey.setGuideStep(nextKey) 达成；此处只按 store 顺序放行
+  // 方案 (b)：store 前端本地 guideStep ≥ 本步 -> 可进一步
+  const next = nextStep.value
+  if (!next) return true                                   // 最后一步（生成报告页）：按钮常亮
+  if (journey.guideStep === 'done') return true            // 已走完旅程
+  return journey.guideStep === next.key                    // 已完成下一步的页面自检
 })
+
+function advance() {
+  if (currentIndex.value >= GUIDE_STEPS.length - 1) { router.push(GUIDE_STEP_MAP.done.route); return }
+  router.push(GUIDE_STEPS[currentIndex.value + 1].route)
+}
+function back() {
+  if (currentIndex.value === 0) { router.push('/welcome'); return }
+  router.push(GUIDE_STEPS[currentIndex.value - 1].route)
+}
 </script>
 
 <template>
-  <div class="journey-layout">
-    <header class="journey-bar">
+  <div class="guide-layout">
+    <header class="guide-bar">
       <router-link to="/" class="brand">CareerAgent</router-link>
       <div class="stage-pocket">
         <span class="stage-here">{{ headerText }}</span>
-        <span v-if="nextStageText" class="stage-next">{{ nextStageText }}</span>
+        <span v-if="nextText" class="stage-next">{{ nextText }}</span>
       </div>
       <div class="user-area">
         <router-link to="/chat" class="chat-link">AI 对话</router-link>
@@ -60,27 +61,35 @@ const nextStageText = computed(() => {
       </div>
     </header>
 
-    <JourneyStepper :items="stepperItems" />
+    <GuideProgressBar :steps="GUIDE_STEPS" :current="currentStep" />
 
-    <main class="journey-content">
-      <router-view v-slot="{ Component, route: childRoute }">
+    <main class="guide-content">
+      <router-view v-slot="{ Component, route: child }">
         <Transition name="page-slide" mode="out-in">
-          <component :is="Component" :key="childRoute.path" />
+          <component :is="Component" :key="child.path" />
         </Transition>
       </router-view>
-      <p v-if="journey.offline" class="offline-hint">离线缓存</p>
     </main>
+
+    <nav class="guide-actions">
+      <p v-if="journey.offline" class="offline-hint">离线缓存</p>
+      <div class="action-btns">
+        <el-button class="back-btn hover-lift" @click="back">上一步</el-button>
+        <el-button type="primary" class="advance-btn hover-lift press-effect"
+                   :disabled="!canAdvance" @click="advance">下一步</el-button>
+      </div>
+    </nav>
   </div>
 </template>
 
 <style scoped>
-.journey-layout {
+.guide-layout {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   background: var(--c-bg);
 }
-.journey-bar {
+.guide-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -127,17 +136,33 @@ const nextStageText = computed(() => {
   font-size: 13px;
   color: var(--c-text-1);
 }
-.journey-content {
+.guide-content {
   flex: 1;
   width: 100%;
   max-width: 720px;
   margin: 0 auto;
   padding: var(--space-12) var(--space-6) var(--space-8);
 }
+.guide-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-6) var(--space-8);
+  border-top: 1px solid var(--c-bg-mute);
+}
+.action-btns {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-left: auto;
+}
 .offline-hint {
-  text-align: center;
   font-size: 12px;
   color: var(--c-warning);
-  margin-top: var(--space-4);
+  margin: 0;
 }
 </style>
