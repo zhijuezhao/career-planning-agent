@@ -1,7 +1,7 @@
-import type { Router, RouteLocationNormalized } from 'vue-router'
+import type { Router } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getToken, TOKEN_KEY } from '../api/auth'
-import { STAGE_META } from '../constants/journey'
+import { GUIDE_STEP_MAP, GUIDE_STEPS } from '../constants/journey'
 import { useJourneyStore } from '../stores/journey'
 
 export function registerGuards(router: Router) {
@@ -22,9 +22,9 @@ export function registerGuards(router: Router) {
       return
     }
 
-    // 2) 已登录访问 /login /register /start（招待归位）：按后端 stage 定位
-    if (token && (guestOnly || to.path === '/start')) {
-      await redirectToStage(next, to)
+    // 2) 已登录访问 /login /register /welcome（招待归位）：两级决策
+    if (token && (guestOnly || to.path === '/welcome')) {
+      await redirectToZone(next, to)
       return
     }
 
@@ -32,28 +32,37 @@ export function registerGuards(router: Router) {
   })
 }
 
-async function redirectToStage(
-  next: (arg?: unknown) => void,
-  to: RouteLocationNormalized,
-) {
+async function redirectToZone(next: (arg?: unknown) => void, to: { path: string }) {
   try {
     const store = useJourneyStore()
     await store.fetchStatus()
-    const route = STAGE_META[store.stage]?.route ?? '/start'
-    if (route === to.path) {
-      next()
+    // 第一级：未看过欢迎页 → /welcome（本地瞬时态，无需请求后端）
+    if (!store.welcomeSeen) {
+      if (to.path === '/welcome') { next(); return }
+      next({ path: '/welcome' })
       return
     }
+    // 第二级：看过欢迎页 → 按后端 zone/guideStep 归位
+    const route = resolveZoneRoute()
+    if (route === to.path) { next(); return }
     next({ path: route })
   } catch (err: any) {
     if (err?.response?.status === 401) {
-      // token 失效：清空 token 与本地缓存，回登录页
+      // token 失效：清空缓存与 token，回登录页
       const store = useJourneyStore()
       store.clearCache()
       localStorage.removeItem(TOKEN_KEY)
       next({ path: '/login' })
       return
     }
-    next({ path: '/start' })
+    // 服务端不可达：读本地缓存（fetchStatus 已自动读），回欢迎页兜底
+    next({ path: '/welcome' })
   }
+}
+
+function resolveZoneRoute(): string {
+  const store = useJourneyStore()
+  if (store.zone === 'business') return '/'
+  if (store.zone === 'guide') return GUIDE_STEP_MAP[store.guideStep ?? 'resume'].route
+  return GUIDE_STEPS[0].route
 }

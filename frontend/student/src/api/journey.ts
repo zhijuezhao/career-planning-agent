@@ -6,27 +6,17 @@
 
 import request from './request'
 
-export type JourneyStage =
-  | 'start'
-  | 'upload'
-  | 'parsing'
-  | 'jobs'
-  | 'matching'
-  | 'career'
-  | 'report'
-  | 'done'
+export type Zone = 'welcome' | 'guide' | 'business'
+export type GuideStep = 'resume' | 'parse' | 'match' | 'career' | 'done'
 
 export interface JourneyStatusResponse {
-  stage: JourneyStage
-  resume_id?: number | null
-  profile_id?: number | null
-  match_id?: number | null
-  path_id?: number | null
-  plan_id?: number | null
-  report_id?: number | null
+  zone: Zone
+  guide_step: GuideStep | null
+  snapshot_id: number | null
+  report_id: number | null
+  report_versions: number
 }
 
 export const journeyApi = {
-  getStatus: (): Promise<JourneyStatusResponse> =>
-    request.get<any, JourneyStatusResponse>('/journey/status'),
+  getStatus: () => request.get<any, JourneyStatusResponse>('/journey/status'),
 }

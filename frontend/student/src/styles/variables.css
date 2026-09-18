@@ -81,4 +81,18 @@
   --el-color-primary-dark-2: var(--c-brand-dark);
   --el-border-radius-base: var(--radius-sm);
   --el-font-family: var(--font-sans);
+
+  /* Typography scale */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+
+  /* Spacing */
+  --space-14: 56px;
+}
+
+/* 全站唯一允许的呼吸 keyframe（欢迎页 logo 使用） */
+@keyframes breathing {
+  0%, 100% { opacity: 1 }
+  50% { opacity: .55 }
 }

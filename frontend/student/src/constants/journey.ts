@@ -1,12 +1,25 @@
-import type { JourneyStage } from '@/api/journey'
+import type { GuideStep } from '@/api/journey'
 
-export const STAGE_META: Record<JourneyStage, { label: string; title: string; route: string; stepperIndex: number }> = {
-  start:    { label: '开始',     title: '开始',     route: '/start',     stepperIndex: 0 },
-  upload:   { label: '上传简历', title: '上传简历', route: '/upload',    stepperIndex: 1 },
-  parsing:  { label: '画像解析', title: '画像解析', route: '/parsing',   stepperIndex: 2 },
-  jobs:     { label: '选择岗位', title: '选择岗位', route: '/jobs',      stepperIndex: 3 },
-  matching: { label: '人岗匹配', title: '人岗匹配', route: '/matching',  stepperIndex: 4 },
-  career:   { label: '成长路线', title: '成长路线', route: '/career',    stepperIndex: 5 },
-  report:   { label: '职业报告', title: '职业报告', route: '/report',    stepperIndex: 6 },
-  done:     { label: '成果总览', title: '成果总览', route: '/dashboard', stepperIndex: 7 },
+export interface GuideStepMeta {
+  key: GuideStep
+  label: string      // 短标题（stepper 节点）
+  title: string      // 页内大标题
+  route: string      // /guide/resume 等
+  stepperIndex: number  // 0..4
+}
+
+export const GUIDE_STEPS: GuideStepMeta[] = [
+  { key: 'resume', label: '简历', title: '上传简历', route: '/guide/resume', stepperIndex: 0 },
+  { key: 'parse', label: '解析', title: '画像解析', route: '/guide/parse', stepperIndex: 1 },
+  { key: 'match', label: '选岗', title: '选择岗位', route: '/guide/match', stepperIndex: 2 },
+  { key: 'career', label: '策略', title: '匹配策略', route: '/guide/career', stepperIndex: 3 },
+  { key: 'done', label: '报告', title: '生成报告', route: '/guide/done', stepperIndex: 4 },
+]
+
+export const GUIDE_STEP_MAP = Object.fromEntries(GUIDE_STEPS.map(s => [s.key, s])) as Record<GuideStep, GuideStepMeta>
+
+export const ZONE_META: Record<string, { label: string; route: string }> = {
+  welcome: { label: '欢迎', route: '/welcome' },
+  guide: { label: '引导', route: '/guide/resume' },
+  business: { label: '业务区', route: '/' },
 }

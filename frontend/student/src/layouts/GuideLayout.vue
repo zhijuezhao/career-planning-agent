@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { STAGE_META } from '@/constants/journey'
-import type { JourneyStage } from '@/api/journey'
+import { GUIDE_STEP_MAP, GUIDE_STEPS } from '@/constants/journey'
+import type { GuideStep } from '@/api/journey'
 import { useJourneyStore } from '@/stores/journey'
 import { useUserStore } from '@/stores/user'
 import JourneyStepper from '@/components/JourneyStepper.vue'
@@ -11,52 +11,38 @@ const route = useRoute()
 const journey = useJourneyStore()
 const userStore = useUserStore()
 
-const STAGE_KEYS: JourneyStage[] = ['upload', 'parsing', 'jobs', 'matching', 'career', 'report', 'done']
+const STAGE_KEYS: GuideStep[] = ['resume', 'parse', 'match', 'career', 'done']
 
-const currentStageKey = computed<JourneyStage>(() => {
-  const s = route.meta.stage as JourneyStage | undefined
-  return s ?? 'upload'
+const currentStageKey = computed<GuideStep>(() => {
+  const s = route.meta.guide as GuideStep | undefined
+  return s ?? 'resume'
 })
-const currentIndex = computed(() => STAGE_META[currentStageKey.value].stepperIndex)
+const currentIndex = computed(() => GUIDE_STEP_MAP[currentStageKey.value].stepperIndex)
 
 const stepperItems = computed(() =>
   STAGE_KEYS.map(key => ({
-    label: STAGE_META[key].label,
-    state: (STAGE_META[key].stepperIndex < currentIndex.value
+    label: GUIDE_STEP_MAP[key].label,
+    state: (GUIDE_STEP_MAP[key].stepperIndex < currentIndex.value
       ? 'done'
-      : STAGE_META[key].stepperIndex === currentIndex.value
+      : GUIDE_STEP_MAP[key].stepperIndex === currentIndex.value
         ? 'current'
         : 'locked') as 'done' | 'current' | 'locked',
   })),
 )
 
-const headerText = computed(() => {
-  const s = route.meta.stage as JourneyStage | undefined
-  if (!s) return 'AI 对话'          // /chat 等非阶段页
-  return `我在 ${STAGE_META[s].title}`
-})
+const headerText = computed(() => `我在 ${GUIDE_STEP_MAP[currentStageKey.value].title}`)
 
 const nextStageText = computed(() => {
-  const s = route.meta.stage as JourneyStage | undefined
-  if (!s) return ''
-  const idx = STAGE_META[s].stepperIndex
-  if (idx >= 7) return '旅程已完成'
-  return `下一步：${STAGE_META[STAGE_KEYS[idx]].label}`
+  const idx = GUIDE_STEP_MAP[currentStageKey.value].stepperIndex
+  if (idx >= GUIDE_STEPS.length - 1) return '引导已完成'
+  return `下一步：${GUIDE_STEPS[idx + 1].label}`
 })
-
-function canAdvance() {
-  return false // 阶段 B 占位：无产出校验，始终禁用；阶段 C 逐步开闸
-}
-
-function handleAdvance() {
-  if (!canAdvance()) return
-}
 </script>
 
 <template>
   <div class="journey-layout">
     <header class="journey-bar">
-      <router-link to="/dashboard" class="brand">CareerAgent</router-link>
+      <router-link to="/" class="brand">CareerAgent</router-link>
       <div class="stage-pocket">
         <span class="stage-here">{{ headerText }}</span>
         <span v-if="nextStageText" class="stage-next">{{ nextStageText }}</span>
@@ -84,17 +70,6 @@ function handleAdvance() {
       </router-view>
       <p v-if="journey.offline" class="offline-hint">离线缓存</p>
     </main>
-
-    <nav class="journey-actions">
-      <el-button
-        type="primary"
-        :disabled="!canAdvance()"
-        class="advance-btn"
-        @click="handleAdvance"
-      >
-        下一步
-      </el-button>
-    </nav>
   </div>
 </template>
 
@@ -164,16 +139,5 @@ function handleAdvance() {
   font-size: 12px;
   color: var(--c-warning);
   margin-top: var(--space-4);
-}
-.journey-actions {
-  padding: var(--space-5) var(--space-8);
-  display: flex;
-  justify-content: center;
-  border-top: 1px solid var(--c-bg-mute);
-  background: var(--c-surface);
-}
-.advance-btn {
-  min-width: 200px;
-  height: 44px;
 }
 </style>

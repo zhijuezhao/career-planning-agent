@@ -1,67 +1,77 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { journeyApi, type JourneyStage, type JourneyStatusResponse } from '@/api/journey'
+import { journeyApi, type GuideStep, type JourneyStatusResponse, type Zone } from '@/api/journey'
 
 const CACHE_PREFIX = 'journey.v1.'
+export const WELCOME_SEEN_KEY = 'journey.v1.welcome_seen'
 
-function cacheKey(name: string) {
-  return `${CACHE_PREFIX}${name}`
-}
+function cacheKey(name: string) { return `${CACHE_PREFIX}${name}` }
 
 export const useJourneyStore = defineStore('journey', () => {
-  const stage = ref<JourneyStage>('start')
-  const status = ref<JourneyStatusResponse | null>(null)
+  const zone = ref<Zone>('welcome')
+  const guideStep = ref<GuideStep | null>(null)
+  const snapshotId = ref<number | null>(null)
+  const reportId = ref<number | null>(null)
+  const reportVersions = ref(0)
   const offline = ref(false)
+  const welcomeSeen = ref(localStorage.getItem(WELCOME_SEEN_KEY) === '1')
 
   function applyToCache(s: JourneyStatusResponse) {
-    localStorage.setItem(cacheKey('stage'), s.stage)
+    localStorage.setItem(cacheKey('zone'), s.zone)
     localStorage.setItem(cacheKey('status'), JSON.stringify(s))
   }
-
   function readFromCache(): JourneyStatusResponse | null {
     const raw = localStorage.getItem(cacheKey('status'))
     if (!raw) return null
     try {
-      const parsed = JSON.parse(raw) as JourneyStatusResponse
-      if (!parsed || typeof parsed.stage !== 'string') return null
-      return parsed
-    } catch {
+      const s = JSON.parse(raw) as JourneyStatusResponse
+      if (s && typeof s.zone === 'string') return s
       return null
-    }
+    } catch { return null }
+  }
+
+  function applyCache(s: JourneyStatusResponse) {
+    zone.value = s.zone
+    guideStep.value = s.guide_step
+    snapshotId.value = s.snapshot_id
+    reportId.value = s.report_id
+    reportVersions.value = s.report_versions
   }
 
   async function fetchStatus() {
     try {
       const res = await journeyApi.getStatus()
-      status.value = res
-      stage.value = res.stage
+      zone.value = res.zone
+      guideStep.value = res.guide_step
+      snapshotId.value = res.snapshot_id
+      reportId.value = res.report_id
+      reportVersions.value = res.report_versions
       applyToCache(res)
       offline.value = false
     } catch (err: any) {
-      // 401 抛给守卫按登出处理；其余失败降级缓存
       if (err?.response?.status === 401) throw err
       const cached = readFromCache()
       if (cached) {
-        status.value = cached
-        stage.value = cached.stage
+        applyCache(cached)      // 逐字段解构进 refs（readFromCache 已 parse + 校验 zone 字段）
         offline.value = true
       }
-      // 无缓存：保持默认 '/start'，静默
     }
   }
 
-  function setStage(s: JourneyStage, s2?: JourneyStatusResponse) {
-    stage.value = s
-    const next = s2 ?? ({ ...(status.value ?? {}), stage: s } as JourneyStatusResponse)
-    status.value = next
-    applyToCache(next)
+  function markWelcomeSeen() {
+    welcomeSeen.value = true
+    localStorage.setItem(WELCOME_SEEN_KEY, '1')
+  }
+
+  function setGuideStep(s: GuideStep) {
+    guideStep.value = s          // 前端瞬时态，仅本地优先级高于服务端
   }
 
   function clearCache() {
-    Object.keys(localStorage)
-      .filter(k => k.startsWith(CACHE_PREFIX))
-      .forEach(k => localStorage.removeItem(k))
+    Object.keys(localStorage).filter(k => k.startsWith(CACHE_PREFIX)).forEach(k => localStorage.removeItem(k))
+    welcomeSeen.value = false
   }
 
-  return { stage, status, offline, fetchStatus, setStage, clearCache }
+  return { zone, guideStep, snapshotId, reportId, reportVersions, offline, welcomeSeen,
+           fetchStatus, setGuideStep, markWelcomeSeen, clearCache }
 })

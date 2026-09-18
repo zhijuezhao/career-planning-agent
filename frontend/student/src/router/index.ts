@@ -1,93 +1,42 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
-import JourneyLayout from '../layouts/JourneyLayout.vue'
 import { registerGuards } from './guards'
 
 const routes: RouteRecordRaw[] = [
+  { path: '/login', name: 'Login', component: () => import('../views/home/LoginView.vue'), meta: { guestOnly: true, title: '登录' } },
+  { path: '/register', name: 'Register', component: () => import('../views/home/RegisterView.vue'), meta: { guestOnly: true, title: '注册' } },
+  { path: '/welcome', name: 'Welcome', component: () => import('../views/welcome/WelcomeView.vue'), meta: { requiresAuth: false, title: '欢迎' } },
+
+  // 引导区（5 步，Guide 外壳）
   {
-    path: '/login',
-    name: 'Login',
-    component: () => import('../views/home/LoginView.vue'),
-    meta: { guestOnly: true, title: '登录' },
-  },
-  {
-    path: '/register',
-    name: 'Register',
-    component: () => import('../views/home/RegisterView.vue'),
-    meta: { guestOnly: true, title: '注册' },
-  },
-  {
-    // 公共开场页：未登录可访问；已登录由守卫重定向到当前阶段
-    path: '/start',
-    name: 'Start',
-    component: () => import('../views/journey/StartView.vue'),
-    meta: { requiresAuth: false, title: '开始' },
-  },
-  {
-    // 旅程父布局：7 个阶段页 + /chat 作为绝对路径子路由挂载
-    path: '/',
-    name: 'JourneyRoot',
-    component: JourneyLayout,
+    path: '/guide',
+    component: () => import('../layouts/GuideLayout.vue'),
     meta: { requiresAuth: true },
     children: [
-      {
-        path: '/upload',
-        name: 'Upload',
-        component: () => import('../views/journey/UploadView.vue'),
-        meta: { stage: 'upload', title: '上传简历' },
-      },
-      {
-        path: '/parsing',
-        name: 'Parsing',
-        component: () => import('../views/journey/ParsingView.vue'),
-        meta: { stage: 'parsing', title: '画像解析' },
-      },
-      {
-        path: '/jobs',
-        name: 'Jobs',
-        component: () => import('../views/journey/JobsView.vue'),
-        meta: { stage: 'jobs', title: '选择岗位' },
-      },
-      {
-        path: '/matching',
-        name: 'Matching',
-        component: () => import('../views/journey/MatchingView.vue'),
-        meta: { stage: 'matching', title: '人岗匹配' },
-      },
-      {
-        path: '/career',
-        name: 'Career',
-        component: () => import('../views/journey/CareerView.vue'),
-        meta: { stage: 'career', title: '成长路线' },
-      },
-      {
-        path: '/report',
-        name: 'Report',
-        component: () => import('../views/journey/ReportView.vue'),
-        meta: { stage: 'report', title: '职业报告' },
-      },
-      {
-        path: '/dashboard',
-        name: 'Dashboard',
-        component: () => import('../views/journey/DashboardView.vue'),
-        meta: { stage: 'done', title: '成果总览' },
-      },
-      {
-        path: '/chat',
-        name: 'Chat',
-        component: () => import('../views/chat/ChatView.vue'),
-        meta: { title: 'AI 对话' },
-      },
-      // 根路径 → /start，由守卫接续处理
-      { path: '', redirect: '/start' },
+      { path: 'resume', name: 'GuideResume', component: () => import('../views/guide/GuideResumeView.vue'), meta: { guide: 'resume', title: '上传简历' } },
+      { path: 'parse', name: 'GuideParse', component: () => import('../views/guide/GuideParseView.vue'), meta: { guide: 'parse', title: '画像解析' } },
+      { path: 'match', name: 'GuideMatch', component: () => import('../views/guide/GuideMatchView.vue'), meta: { guide: 'match', title: '选择岗位' } },
+      { path: 'career', name: 'GuideCareer', component: () => import('../views/guide/GuideCareerView.vue'), meta: { guide: 'career', title: '匹配策略' } },
+      { path: 'done', name: 'GuideDone', component: () => import('../views/guide/GuideDoneView.vue'), meta: { guide: 'done', title: '生成报告' } },
+      { path: '', redirect: '/guide/resume' },
     ],
   },
-  // 404 → /start，由守卫按登录态归位
+
+  // 业务区（Task 12 建壳，BusinessLayout 父；页面 13-15 填）
   {
-    path: '/:pathMatch(.*)*',
-    name: 'NotFound',
-    redirect: '/start',
+    path: '/',
+    component: () => import('../layouts/BusinessLayout.vue'),
+    meta: { requiresAuth: true },
+    children: [
+      { path: '', name: 'Dashboard', component: () => import('../views/business/DashboardView.vue'), meta: { title: '总览' } },
+      { path: 'resume', name: 'Resume', component: () => import('../views/business/ResumeView.vue'), meta: { title: '我的简历' } },
+      { path: 'jobs', name: 'Jobs', component: () => import('../views/business/JobsView.vue'), meta: { title: '岗位库' } },
+      { path: 'career', name: 'CareerReport', component: () => import('../views/business/CareerView.vue'), meta: { title: '职业报告' } },
+      { path: 'chat', name: 'Chat', component: () => import('../views/business/ChatView.vue'), meta: { title: 'AI 对话' } },
+    ],
   },
+
+  { path: '/:pathMatch(.*)*', name: 'NotFound', redirect: '/welcome' },
 ]
 
 const router = createRouter({

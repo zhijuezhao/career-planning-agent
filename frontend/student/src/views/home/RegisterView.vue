@@ -20,7 +20,7 @@ async function handleRegister() {
   try {
     await userStore.register(form.value.username, form.value.password, form.value.email || undefined)
     ElMessage.success('注册成功，开始你的成长旅程')
-    router.push('/start')
+    router.push('/welcome')
   } catch {
     triggerShake()
   } finally {
