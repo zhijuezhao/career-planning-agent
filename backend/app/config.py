@@ -38,7 +38,13 @@ class Settings(BaseSettings):
     longcat_base_url: str = "https://api.longcat.chat/openai"
     longcat_model: str = "LongCat-2.0"
 
-    # Embedding - SiliconFlow
+    # Embedding - 可配置 provider（EMBEDDING_* 优先；留空则回退 SiliconFlow 兼容配置）
+    # 数据库列固定为 vector(1024)，切换 provider 时必须确认输出维度为 1024。
+    embedding_api_key: str = ""
+    embedding_base_url: str = ""
+    embedding_model: str = ""
+
+    # Embedding - SiliconFlow（兼容回退）
     siliconflow_api_key: str = ""
     siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
     siliconflow_embedding_model: str = "Qwen/Qwen3-Embedding-8B"

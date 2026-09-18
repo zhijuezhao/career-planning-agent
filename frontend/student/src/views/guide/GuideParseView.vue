@@ -238,11 +238,24 @@ async function confirmAndSnapshot(): Promise<void> {
   if (!hasPortrait.value || confirming.value) return
   confirming.value = true
   try {
+    const layers = fiveLayers.value ?? {}
+    const scoringValue = scoring.value
+    // 六维分数需要 **扁平** {维度名: 分数} 映射：后端 _candidate_scores() 直接读
+    // snapshot.six_dim_scores_json 的 key 作为维度名做逐维对比（R-11.7）。
+    // 若把整份 DimensionScoring 塞进去，聚合循环会把 total_dim_score/profile_type/
+    // dimensions 当成维度名，导致六维对比全部错位。
+    const sixDimFlat: Record<string, number> = {}
+    for (const [dimName, detail] of Object.entries(scoringValue?.dimensions ?? {})) {
+      sixDimFlat[dimName] = Number(detail?.score ?? 0)
+    }
     // 顶层平铺 + five_layers 双写：后端按顶层 intention/practice/hard_skills 推导当前步骤
     const resumeForm = {
-      ...(fiveLayers.value ?? {}),
-      five_layers: fiveLayers.value ?? {},
-      dimension_scoring: scoring.value ?? {},
+      ...layers,
+      five_layers: layers,
+      // 供快照冻结用的完整评分对象
+      dimension_scoring: scoringValue ?? {},
+      // 扁平六维（匹配服务读这个字段）
+      six_dim_scores: sixDimFlat,
     }
     await profileApi.updateProfile(resumeForm as Record<string, any>)
     const task = await profileApi.createSnapshot()
@@ -287,9 +300,10 @@ async function confirmAndSnapshot(): Promise<void> {
       :icon="Search"
       title="还没有解析结果"
       description="先上传简历完成解析，再回到这一步确认画像。"
-    >
-      <router-link class="go-link" to="/guide/resume">去上传简历</router-link>
-    </EmptyState>
+      show-action
+      action-text="去上传简历"
+      @action="router.push('/guide/resume')"
+    />
 
     <template v-else>
       <div class="radar-panel">
@@ -379,19 +393,6 @@ async function confirmAndSnapshot(): Promise<void> {
 .state-text {
   font-size: var(--text-sm);
   margin: 0;
-}
-.go-link {
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--c-brand);
-  text-decoration: none;
-  padding: var(--space-2) var(--space-4);
-  border-radius: var(--radius-full);
-  background: var(--c-brand-lighter);
-  transition: opacity 0.2s ease;
-}
-.go-link:hover {
-  opacity: 0.85;
 }
 
 /* 雷达面板 */

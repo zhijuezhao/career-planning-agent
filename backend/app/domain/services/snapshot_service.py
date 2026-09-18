@@ -18,6 +18,38 @@ logger = logging.getLogger(__name__)
 _ZERO_EMBEDDING = [0.0] * 1024
 
 
+def _six_dim_scores(form_raw: dict) -> dict:
+    """把表单里的六维评分归一为 **扁平** {维度名: 分数} 映射。
+
+    匹配服务 `_candidate_scores()` 直接读 `ProfileSnapshot.six_dim_scores_json`
+    并以其 key 作为维度名，因此这里必须存扁平映射：
+    - 优先 form["six_dim_scores"]（前端显式提供的扁平映射）
+    - 否则从 form["dimension_scoring"]["dimensions"][dim]["score"] 抽取
+    若整份 DimensionScoring 原样入库，`job_matcher.compute_match_score` 会把
+    total_dim_score / profile_type / dimensions 当成维度名，导致六维对比全部错位（R-11.7）。
+    """
+    flat = form_raw.get("six_dim_scores")
+    if isinstance(flat, dict) and flat:
+        out: dict[str, float] = {}
+        for name, value in flat.items():
+            if isinstance(value, (int, float)):
+                out[str(name)] = float(value)
+        if out:
+            return out
+
+    scoring = form_raw.get("dimension_scoring") or {}
+    dimensions = scoring.get("dimensions") if isinstance(scoring, dict) else None
+    if isinstance(dimensions, dict):
+        out = {}
+        for name, detail in dimensions.items():
+            if isinstance(detail, dict) and isinstance(detail.get("score"), (int, float)):
+                out[str(name)] = float(detail["score"])
+        if out:
+            return out
+
+    return {}
+
+
 async def create_profile_snapshot(user_id: int, db: AsyncSession) -> ProfileSnapshot:
     """为 user 创建（或去重回用）ProfileSnapshot，返回已提交实例。
 
@@ -53,7 +85,7 @@ async def create_profile_snapshot(user_id: int, db: AsyncSession) -> ProfileSnap
 
     # 组装（所有数据来自 form_raw —— 上传返回的 five_layers/dimension_scoring 已随表单回填）
     five_layers = form_raw.get("five_layers") or {}
-    dims = form_raw.get("dimension_scoring") or {}
+    dims = _six_dim_scores(form_raw)
 
     text = build_portrait_text(five_layers)
     if text.strip():
