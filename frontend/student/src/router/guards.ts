@@ -1,6 +1,7 @@
 import type { Router } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getToken, TOKEN_KEY } from '../api/auth'
+import type { GuideStep } from '../api/journey'
 import { GUIDE_STEP_MAP, GUIDE_STEPS } from '../constants/journey'
 import { useJourneyStore } from '../stores/journey'
 
@@ -28,8 +29,36 @@ export function registerGuards(router: Router) {
       return
     }
 
+    // 3) 业务区路由的引导归位（R-12.1 守卫修复）：引导中的用户（zone=guide）
+    //    不得绕过引导直接进业务区。
+    //    必须排除 /chat：引导区顶栏「AI 对话」链向它（GuideLayout.vue:51），
+    //    不排除则点击后被弹回引导区，形成重定向死循环。
+    //    不加限制的情形：zone=welcome（欢迎页有「直接进入成果区」的显式逃生入口，
+    //    且此阶段业务区尚无内容）、zone=business（已出报告，业务区是其正式主场）。
+    if (token && !isGuideRoute(to.path) && to.path !== '/chat') {
+      try {
+        const store = useJourneyStore()
+        if (store.zone === 'guide') {
+          const back = guideRouteFor(store.guideStep)
+          if (to.path !== back) { next({ path: back }); return }
+        }
+      } catch {
+        /* 状态不可用时放行，绝不因归位失败卡死导航 */
+      }
+    }
+
     next()
   })
+}
+
+/** 是否属于引导区路由（/guide/*） */
+function isGuideRoute(path: string): boolean {
+  return path === '/guide' || path.startsWith('/guide/')
+}
+
+/** 引导步骤 → 对应引导区路由 */
+function guideRouteFor(step: GuideStep | null): string {
+  return GUIDE_STEP_MAP[step ?? 'resume'].route
 }
 
 async function redirectToZone(next: (arg?: unknown) => void, to: { path: string }) {
