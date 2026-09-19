@@ -1,4 +1,5 @@
 import time
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -56,7 +57,10 @@ def authed_user(client):
     token = login.json()["access_token"]
 
     client.headers["Authorization"] = f"Bearer {token}"
-    return pytest.SimpleNamespace(id=user["id"], username=user["username"])
+    # 注意：pytest 模块没有 SimpleNamespace，必须用标准库 types.SimpleNamespace
+    # （原写法 `pytest.SimpleNamespace` 会让所有依赖 authed_user 的测试在 setup 阶段
+    #  报 AttributeError，2026-09-18 修复）
+    return SimpleNamespace(id=user["id"], username=user["username"])
 
 
 @pytest_asyncio.fixture

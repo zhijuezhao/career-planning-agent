@@ -17,7 +17,11 @@ RUN pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
     python-multipart loguru httpx \
     pypdf2 python-docx pandas openpyxl pdfplumber beautifulsoup4 \
     langchain langchain-core langchain-community langchain-openai \
-    langgraph langsmith
+    langgraph langsmith \
+    pytest pytest-asyncio
+# ↑ pytest / pytest-asyncio：与 pyproject [tool.poetry.group.dev.dependencies] 对齐。
+#   容器重建后若不带这两个包，`docker exec ... python -m pytest` 会报 No module named pytest
+#   （2026-09-18 实测踩坑：镜像重建丢失一次性 pip 安装的测试工具链）。
 
 # Copy application code
 COPY backend/ /app/backend/
