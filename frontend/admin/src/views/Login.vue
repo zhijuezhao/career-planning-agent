@@ -3,7 +3,7 @@ import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { Lock, User } from '@element-plus/icons-vue'
-import { get, post, put, remove } from '@/api/request'
+import { post } from '@/api/request'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
@@ -27,7 +27,7 @@ const handleLogin = async () => {
     if (!valid) return
     loading.value = true
     try {
-      const res = await post<{ access_token: string }>('/v1/auth/login', form)
+      const res = await post<{ access_token: string }>('/v1/admin/auth/login', form)
       authStore.setToken(res.access_token, form.username)
       ElMessage.success('登录成功')
       router.push('/dashboard')

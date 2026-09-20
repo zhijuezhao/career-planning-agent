@@ -13,6 +13,7 @@ from app.api.v1.admin.system import router as system_router
 from app.api.v1.admin.users import router as users_router
 
 router = APIRouter()
+router.include_router(admin_auth.router, prefix="/auth", tags=["admin-auth"])
 router.include_router(chat_router, prefix="/chat", tags=["admin-chat"])
 router.include_router(career_router, prefix="/career", tags=["admin-career"])
 router.include_router(dashboard_router, prefix="/dashboard", tags=["admin-dashboard"])

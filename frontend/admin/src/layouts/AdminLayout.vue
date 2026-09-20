@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
+import { useAuthStore } from '@/stores/auth'
 import {
   ArrowDown,
   Briefcase,
@@ -21,6 +22,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 const isCollapse = ref(false)
+const authStore = useAuthStore()
 
 const menuItems = [
   { path: '/dashboard', title: '仪表盘', icon: Odometer },
@@ -44,7 +46,7 @@ const handleLogout = async () => {
       cancelButtonText: '取消',
       type: 'warning',
     })
-    localStorage.removeItem('token')
+    authStore.clearToken()
     router.push('/login')
   } catch {
     // cancelled
@@ -95,7 +97,7 @@ const handleLogout = async () => {
               <el-avatar :size="32" class="user-avatar">
                 <el-icon><User /></el-icon>
               </el-avatar>
-              <span class="user-name">管理员</span>
+              <span class="user-name">{{ authStore.username || '管理员' }}</span>
               <el-icon><ArrowDown /></el-icon>
             </span>
             <template #dropdown>

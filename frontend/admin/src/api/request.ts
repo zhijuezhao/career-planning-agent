@@ -1,5 +1,6 @@
 import axios, { type AxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
+import { ADMIN_NAME_KEY, ADMIN_TOKEN_KEY } from '@/stores/auth'
 
 const request = axios.create({
   baseURL: '/api',
@@ -8,7 +9,7 @@ const request = axios.create({
 
 request.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem(ADMIN_TOKEN_KEY)
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
@@ -23,8 +24,11 @@ request.interceptors.response.use(
     const message = error.response?.data?.detail || error.message || '请求失败'
     ElMessage.error(message)
 
-    if (error.response?.status === 401) {
-      localStorage.removeItem('token')
+    // 登录接口自身的 401/403 只提示、不跳转（否则整页刷新会把提示冲掉）
+    const isLoginRequest = String(error.config?.url ?? '').includes('/admin/auth/login')
+    if (error.response?.status === 401 && !isLoginRequest) {
+      localStorage.removeItem(ADMIN_TOKEN_KEY)
+      localStorage.removeItem(ADMIN_NAME_KEY)
       window.location.href = `${import.meta.env.BASE_URL}login`
     }
 

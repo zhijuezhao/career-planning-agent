@@ -115,20 +115,39 @@ async def _fetch_user_id(username: str) -> int:
 
 
 @pytest.fixture(scope="module")
-def admin_token(client, request) -> str:
-    """模块级管理员 token：注册 -> 提权 admin -> 登录。"""
+def admin_credentials(client, request) -> tuple[str, str]:
+    """模块级管理员账号 (用户名, 密码)：注册 -> 提权 admin。
+
+    S2 起单独提供：管理员登录用例需要明文凭据，而不只是 token。
+    """
     uname = _unique_username("admin", request.module.__name__)
-    _register(client, uname, "admin123456")
+    password = "admin123456"
+    _register(client, uname, password)
     asyncio.run(_set_role(uname, "admin"))
-    return _login(client, uname, "admin123456")
+    return uname, password
 
 
 @pytest.fixture(scope="module")
-def student_token(client, request) -> str:
-    """模块级普通学生 token（用于 403 越权用例）。"""
+def admin_token(client, admin_credentials) -> str:
+    """模块级管理员 token：注册 -> 提权 admin -> 登录。"""
+    uname, password = admin_credentials
+    return _login(client, uname, password)
+
+
+@pytest.fixture(scope="module")
+def student_credentials(client, request) -> tuple[str, str]:
+    """模块级普通学生账号 (用户名, 密码)：S2 起供「学生登录 admin 被拒」用例复用。"""
     uname = _unique_username("student", request.module.__name__)
-    _register(client, uname, "student123456")
-    return _login(client, uname, "student123456")
+    password = "student123456"
+    _register(client, uname, password)
+    return uname, password
+
+
+@pytest.fixture(scope="module")
+def student_token(client, student_credentials) -> str:
+    """模块级普通学生 token（用于 403 越权用例）。"""
+    uname, password = student_credentials
+    return _login(client, uname, password)
 
 
 @pytest.fixture(scope="module")

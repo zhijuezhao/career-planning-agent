@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import AdminLayout from '@/layouts/AdminLayout.vue'
+import { ADMIN_TOKEN_KEY } from '@/stores/auth'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -84,6 +85,15 @@ const router = createRouter({
       redirect: '/dashboard',
     },
   ],
+})
+
+// 守卫（S2）：除 /login 外都要求管理端 token；已登录时访问 /login 直接回仪表盘
+router.beforeEach((to) => {
+  const hasToken = !!localStorage.getItem(ADMIN_TOKEN_KEY)
+  if (to.path === '/login') {
+    return hasToken ? '/dashboard' : true
+  }
+  return hasToken ? true : '/login'
 })
 
 export default router

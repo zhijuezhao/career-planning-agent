@@ -59,3 +59,56 @@ class TestUserUpdateSecurity:
             headers={"Authorization": f"Bearer {student_token}"},
         )
         assert resp.status_code == 403
+
+
+class TestAdminLogin:
+    """S2: 管理员登录端点 POST /api/v1/admin/auth/login。"""
+
+    def test_admin_login_success_and_token_usable(
+        self, client: TestClient, admin_credentials: tuple[str, str]
+    ):
+        """管理员凭据可换 token，且该 token 能访问管理端点。"""
+        uname, password = admin_credentials
+        resp = client.post(
+            "/api/v1/admin/auth/login", json={"username": uname, "password": password}
+        )
+        assert resp.status_code == 200, resp.text
+        token = resp.json()["access_token"]
+        assert token
+
+        health = client.get(
+            "/api/v1/admin/dashboard/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert health.status_code == 200
+        assert health.json()["admin"] == uname
+
+    def test_student_login_rejected(
+        self, client: TestClient, student_credentials: tuple[str, str]
+    ):
+        """学生账号走管理端登录必须被拒（403），且不得拿到 token。"""
+        uname, password = student_credentials
+        resp = client.post(
+            "/api/v1/admin/auth/login", json={"username": uname, "password": password}
+        )
+        assert resp.status_code == 403
+        assert "access_token" not in resp.json()
+
+    def test_wrong_password_rejected(
+        self, client: TestClient, admin_credentials: tuple[str, str]
+    ):
+        """密码错误返回 401。"""
+        uname, _ = admin_credentials
+        resp = client.post(
+            "/api/v1/admin/auth/login",
+            json={"username": uname, "password": "definitely-wrong"},
+        )
+        assert resp.status_code == 401
+
+    def test_unknown_user_rejected(self, client: TestClient):
+        """账号不存在同样返回 401（与密码错误不可区分，避免探测账号）。"""
+        resp = client.post(
+            "/api/v1/admin/auth/login",
+            json={"username": "no_such_admin_user_xyz", "password": "whatever123"},
+        )
+        assert resp.status_code == 401
