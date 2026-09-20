@@ -17,13 +17,10 @@ export default defineConfig({
   server: {
     port: 5174,
     proxy: {
-      '/admin-api': {
-        target: 'http://localhost:8001',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/admin-api/, '/api/v1/admin'),
-      },
+      // 后端以 Docker 运行：容器内 8001，宿主机映射 8002（见 docs/本地运行启动说明.md）
+      // 若改用本地原生 uvicorn（--port 8001），临时改回 http://localhost:8001（改完不要提交）
       '/api': {
-        target: 'http://localhost:8001',
+        target: 'http://localhost:8002',
         changeOrigin: true,
       },
     },

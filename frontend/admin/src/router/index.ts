@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AdminLayout from '@/layouts/AdminLayout.vue'
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
       path: '/login',
@@ -76,6 +76,12 @@ const router = createRouter({
           meta: { title: '系统配置', icon: 'Setting' },
         },
       ],
+    },
+    {
+      // 兜底路由：任何未匹配路径都回仪表盘（避免刷新/手输路径时白屏，见 docs/superpowers/plans/2026-09-20-admin-console.md S0）
+      path: '/:pathMatch(.*)*',
+      name: 'NotFound',
+      redirect: '/dashboard',
     },
   ],
 })
