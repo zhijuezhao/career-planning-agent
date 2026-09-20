@@ -188,49 +188,6 @@ class DimensionWeightListResponse(BaseModel):
     items: list[DimensionWeightResponse]
 
 
-# ── Career Path Admin Schemas ───────────────────────────────────────────────
-
-class GrowthPathResponse(BaseModel):
-    id: int
-    user_id: int
-    target_position: str | None
-    path_type: str | None
-    current_abilities: dict | None
-    target_abilities: dict | None
-    milestones: dict | None
-    generated_plan: dict | None
-    learning_resources: dict | None
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class GrowthPathListResponse(BaseModel):
-    total: int
-    items: list[GrowthPathResponse]
-
-
-class GrowthPlanResponse(BaseModel):
-    id: int
-    user_id: int
-    growth_path_id: int
-    cycle_weeks: int | None
-    intensity: str | None
-    tasks: dict | None
-    progress: dict | None
-    weekly_reviews: dict | None
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class GrowthPlanListResponse(BaseModel):
-    total: int
-    items: list[GrowthPlanResponse]
-
-
 # ── Report Admin Schemas ────────────────────────────────────────────────────
 
 class ReportResponse(BaseModel):

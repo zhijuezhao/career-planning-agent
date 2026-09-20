@@ -1,3 +1,7 @@
+# ⚠️ ORPHAN（S3 有意保留）：本提示词当前**无任何引用**。
+# 其对应的 growth_paths / growth_plans 表与 path_planner 已随数据模型重构删除
+# （Task 1 / Task 0 admin 清理）。保留此处，待未来「结构化成长计划」立项时复用；
+# 当前该能力以报告模块五/六的自由文本形式存在（见 prompts/profile_analysis.py）。
 GROWTH_PLAN_SYSTEM_PROMPT = """\
 你是一个专业的职业成长教练。根据用户的职业发展路线和当前能力水平，生成一份详细的、可执行的成长计划。
 

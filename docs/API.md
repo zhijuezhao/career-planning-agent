@@ -13,7 +13,6 @@
 - [认证接口](#认证接口)
 - [用户接口](#用户接口)
 - [简历接口](#简历接口)
-- [职业规划接口](#职业规划接口)
 - [人岗匹配接口](#人岗匹配接口)
 - [报告接口](#报告接口)
 - [聊天接口](#聊天接口)
@@ -158,50 +157,6 @@ GET /api/v1/resume/{resume_id}
   "status": "completed",
   "parsed_data": { ... },
   "profile_id": 1
-}
-```
-
----
-
-## 职业规划接口
-
-### 生成职业路线
-```
-POST /api/v1/career/path
-```
-
-**请求体**:
-```json
-{
-  "profile_id": 1,
-  "target_job_id": 1,
-  "current_stage": "在校学生"
-}
-```
-
-**响应**:
-```json
-{
-  "id": 1,
-  "user_id": 1,
-  "target_position": "软件工程师",
-  "path_type": "技术路线",
-  "milestones": [ ... ],
-  "learning_resources": { ... }
-}
-```
-
-### 生成成长计划
-```
-POST /api/v1/career/growth-plan
-```
-
-**请求体**:
-```json
-{
-  "growth_path_id": 1,
-  "weekly_hours": 10,
-  "cycle_weeks": 12
 }
 ```
 

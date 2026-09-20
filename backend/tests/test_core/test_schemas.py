@@ -30,7 +30,11 @@ except ImportError:  # pragma: no cover
     MatchRunRequest = None
     FeedbackCreateRequest = None
 from app.schemas.reports import ReportGenerateRequest
-from app.schemas.career import CareerPathRequest, GrowthPlanRequest
+try:
+    from app.schemas.career import CareerPathRequest, GrowthPlanRequest
+except ImportError:  # pragma: no cover - schemas/career.py 已随 S3 摘除
+    CareerPathRequest = None
+    GrowthPlanRequest = None
 
 
 class TestUserRegisterSchema:

@@ -47,12 +47,6 @@ const router = createRouter({
           meta: { title: '匹配管理', icon: 'Connection' },
         },
         {
-          path: 'career',
-          name: 'Career',
-          component: () => import('@/views/Career.vue'),
-          meta: { title: '职业路线', icon: 'TrendCharts' },
-        },
-        {
           path: 'users',
           name: 'Users',
           component: () => import('@/views/Users.vue'),

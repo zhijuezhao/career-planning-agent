@@ -14,7 +14,6 @@ import {
   Fold,
   Odometer,
   Setting,
-  TrendCharts,
   Upload,
   User,
 } from '@element-plus/icons-vue'
@@ -30,7 +29,6 @@ const menuItems = [
   { path: '/raw-data', title: '原始数据', icon: Document },
   { path: '/import', title: '数据导入', icon: Upload },
   { path: '/matching', title: '匹配管理', icon: Connection },
-  { path: '/career', title: '职业路线', icon: TrendCharts },
   { path: '/users', title: '用户管理', icon: User },
   { path: '/reports', title: '报告管理', icon: DocumentChecked },
   { path: '/chat', title: '对话记录', icon: ChatDotRound },
