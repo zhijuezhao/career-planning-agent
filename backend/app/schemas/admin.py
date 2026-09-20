@@ -190,22 +190,26 @@ class DimensionWeightListResponse(BaseModel):
 
 # ── Report Admin Schemas ────────────────────────────────────────────────────
 
-class ReportResponse(BaseModel):
+class AdminReportSummary(BaseModel):
+    """报告记录列表项（基于 report_records；不含 report_text）。"""
     id: int
     user_id: int
-    profile_id: int
-    target_job: str | None
-    report_content: dict | None
-    word_file_path: str | None
+    profile_snapshot_id: int
+    serial_no: UUID
+    description: str
     version: int
     created_at: datetime
 
-    model_config = {"from_attributes": True}
+
+class AdminReportDetail(AdminReportSummary):
+    """报告记录详情：含完整 report_text 与惰性 Word 路径。"""
+    report_text: str
+    word_file_path: str | None = None
 
 
-class ReportListResponse(BaseModel):
+class AdminReportListResponse(BaseModel):
     total: int
-    items: list[ReportResponse]
+    items: list[AdminReportSummary]
 
 
 # ── Chat Admin Schemas ──────────────────────────────────────────────────────

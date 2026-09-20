@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { get, post, put, remove } from '@/api/request'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { get, remove } from '@/api/request'
 
 interface ReportItem {
   id: number
   user_id: number
-  target_job: string | null
+  profile_snapshot_id: number
+  serial_no: string
+  description: string
   version: number
   created_at: string
 }
@@ -19,6 +21,7 @@ const query = reactive({
   page: 1,
   limit: 20,
   user_id: undefined as number | undefined,
+  keyword: '',
 })
 
 const fetchData = async () => {
@@ -29,6 +32,7 @@ const fetchData = async () => {
       limit: query.limit,
     }
     if (query.user_id) params.user_id = query.user_id
+    if (query.keyword) params.keyword = query.keyword
     const res = await get<{ items: ReportItem[]; total: number }>('/v1/admin/reports', { params })
     tableData.value = res.items
     total.value = res.total
@@ -44,12 +48,36 @@ const handleSearch = () => {
   fetchData()
 }
 
-const handleDownload = (row: ReportItem) => {
-  const token = localStorage.getItem('token')
-  window.open(`/api/v1/admin/reports/${row.id}/download?token=${token}`, '_blank')
+/**
+ * 下载 Word：后端只认 Authorization 头（原实现用 ?token= 会被 401），
+ * 所以走 axios 拿 blob，再用临时 <a> 触发浏览器下载。
+ */
+const handleDownload = async (row: ReportItem) => {
+  try {
+    const blob = await get<Blob>(`/v1/admin/reports/${row.id}/download`, { responseType: 'blob' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `生涯发展报告_v${row.version}_${row.serial_no}.docx`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch {
+    // error handled by interceptor
+  }
 }
 
 const handleDelete = async (row: ReportItem) => {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除「用户 ${row.user_id} 第 ${row.version} 版」报告？删除后不可恢复。`,
+      '提示',
+      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return // 用户取消
+  }
   try {
     await remove(`/v1/admin/reports/${row.id}`)
     ElMessage.success('删除成功')
@@ -72,18 +100,26 @@ onMounted(fetchData)
           style="width: 150px"
           clearable
         />
+        <el-input
+          v-model="query.keyword"
+          placeholder="描述关键字"
+          style="width: 200px"
+          clearable
+          @keyup.enter="handleSearch"
+        />
         <el-button type="primary" @click="handleSearch">搜索</el-button>
       </div>
 
       <el-table v-loading="loading" :data="tableData" stripe>
         <el-table-column prop="id" label="ID" width="80" />
         <el-table-column prop="user_id" label="用户ID" width="100" />
-        <el-table-column prop="target_job" label="目标岗位" />
         <el-table-column label="版本" width="80">
           <template #default="{ row }">
             <el-tag size="small">v{{ row.version }}</el-tag>
           </template>
         </el-table-column>
+        <el-table-column prop="description" label="描述" />
+        <el-table-column prop="profile_snapshot_id" label="快照ID" width="100" />
         <el-table-column label="创建时间" width="180">
           <template #default="{ row }">
             {{ new Date(row.created_at).toLocaleString() }}
