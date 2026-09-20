@@ -28,58 +28,13 @@ async def _get_user_id(username: str) -> int:
         return result.scalar_one().id
 
 
-@pytest.fixture(scope="module")
-def admin_token(client: TestClient) -> str:
-    uname = f"admin_users_{_ts}"
-    client.post("/api/v1/auth/register", json={
-        "username": uname,
-        "password": "admin123456",
-    })
-    from app.domain.models.user import User
-
-    async def set_admin():
-        async with AsyncSession(_test_engine) as session:
-            result = await session.execute(select(User).where(User.username == uname))
-            user = result.scalar_one_or_none()
-            if user:
-                user.role = "admin"
-                await session.commit()
-
-    loop = asyncio.new_event_loop()
-    loop.run_until_complete(set_admin())
-    loop.close()
-
-    resp = client.post("/api/v1/auth/login", json={
-        "username": uname,
-        "password": "admin123456",
-    })
-    return resp.json()["access_token"]
-
-
-@pytest.fixture(scope="module")
-def student_token(client: TestClient) -> str:
-    uname = f"student_users_{_ts}"
-    client.post("/api/v1/auth/register", json={
-        "username": uname,
-        "password": "student123456",
-    })
-    resp = client.post("/api/v1/auth/login", json={
-        "username": uname,
-        "password": "student123456",
-    })
-    return resp.json()["access_token"]
-
-
 def _create_user(client: TestClient, username: str) -> int:
     """Register a user and return their ID."""
     client.post("/api/v1/auth/register", json={
         "username": username,
         "password": "test123456",
     })
-    loop = asyncio.new_event_loop()
-    user_id = loop.run_until_complete(_get_user_id(username))
-    loop.close()
-    return user_id
+    return asyncio.run(_get_user_id(username))
 
 
 class TestUsersAPI:

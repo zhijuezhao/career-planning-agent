@@ -1,90 +1,12 @@
-import asyncio
-import time
 
 import pytest
 from app.main import app
 from fastapi.testclient import TestClient
 
-_ts = str(int(time.time()))
-
 
 @pytest.fixture(scope="module")
 def client():
     return TestClient(app)
-
-
-@pytest.fixture(scope="module")
-def admin_token(client: TestClient) -> str:
-    # Register admin user
-    uname = f"admin_{_ts}"
-    client.post("/api/v1/auth/register", json={
-        "username": uname,
-        "password": "admin123456",
-    })
-    # Manually set role to admin (in real scenario, this would be done via DB or admin API)
-    from app.infrastructure.database import async_session_factory
-    from app.domain.models.user import User
-
-    async def set_admin():
-        async with async_session_factory() as session:
-            result = await session.execute(
-                __import__("sqlalchemy").select(User).where(User.username == uname)
-            )
-            user = result.scalar_one_or_none()
-            if user:
-                user.role = "admin"
-                await session.commit()
-
-    # Use a new event loop for setup
-    loop = asyncio.new_event_loop()
-    loop.run_until_complete(set_admin())
-    loop.close()
-
-    resp = client.post("/api/v1/auth/login", json={
-        "username": uname,
-        "password": "admin123456",
-    })
-    return resp.json()["access_token"]
-
-
-@pytest.fixture(scope="module")
-def student_token(client: TestClient) -> str:
-    uname = f"student_{_ts}"
-    client.post("/api/v1/auth/register", json={
-        "username": uname,
-        "password": "student123456",
-    })
-    resp = client.post("/api/v1/auth/login", json={
-        "username": uname,
-        "password": "student123456",
-    })
-    return resp.json()["access_token"]
-
-
-@pytest.fixture(scope="module")
-def other_user_id(client: TestClient, student_token: str) -> int:
-    """Create another user and return their ID."""
-    uname = f"other_{_ts}"
-    client.post("/api/v1/auth/register", json={
-        "username": uname,
-        "password": "other123456",
-    })
-
-    from app.infrastructure.database import async_session_factory
-    from app.domain.models.user import User
-
-    async def get_user_id():
-        async with async_session_factory() as session:
-            result = await session.execute(
-                __import__("sqlalchemy").select(User).where(User.username == uname)
-            )
-            user = result.scalar_one_or_none()
-            return user.id if user else None
-
-    loop = asyncio.new_event_loop()
-    user_id = loop.run_until_complete(get_user_id())
-    loop.close()
-    return user_id
 
 
 class TestRequireAdmin:
