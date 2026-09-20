@@ -5,7 +5,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
+from app.domain.models.profile_snapshot import ProfileSnapshot
 from app.domain.models.report import ChatSession
+from app.domain.models.report_record import ReportRecord
 from app.domain.models.resume import Resume
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
@@ -89,12 +91,29 @@ async def get_user_stats(
         select(func.count()).select_from(ChatSession).where(ChatSession.user_id == user_id)
     )).scalar() or 0
 
+    # 已匹配快照数（原 JobMatch 表已删除，S4 改为真值）
+    match_count = (await db.execute(
+        select(func.count())
+        .select_from(ProfileSnapshot)
+        .where(
+            ProfileSnapshot.user_id == user_id,
+            ProfileSnapshot.matched_at.isnot(None),
+        )
+    )).scalar() or 0
+
+    # 报告记录数（原 CareerReport 表已删除，S4 改为真值）
+    report_count = (await db.execute(
+        select(func.count())
+        .select_from(ReportRecord)
+        .where(ReportRecord.user_id == user_id)
+    )).scalar() or 0
+
     return AdminUserStats(
         user_id=user.id,
         username=user.username,
         resume_count=resume_count,
-        match_count=0,
-        report_count=0,
+        match_count=match_count,
+        report_count=report_count,
         chat_session_count=chat_session_count,
     )
 

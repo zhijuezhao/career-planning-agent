@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
 from app.domain.models.job import JobProfile, JobRawData
+from app.domain.models.profile_snapshot import ProfileSnapshot
 from app.domain.models.report import ChatSession
+from app.domain.models.report_record import ReportRecord
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
     DashboardOverview,
     JobCategoryStat,
-    MatchStats,
     QualityDistribution,
+    SnapshotStats,
     SystemHealth,
     UserGrowthStat,
 )
@@ -46,12 +48,26 @@ async def dashboard_overview(
     # Total chat sessions
     chat_count = (await db.execute(select(func.count()).select_from(ChatSession))).scalar() or 0
 
+    # 已匹配的画像快照数（匹配明细不再落表，matched_at 为完成标记）
+    matched_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(ProfileSnapshot)
+            .where(ProfileSnapshot.matched_at.isnot(None))
+        )
+    ).scalar() or 0
+
+    # 报告记录数（原 CareerReport 表已删除，改为 report_records）
+    report_count = (
+        await db.execute(select(func.count()).select_from(ReportRecord))
+    ).scalar() or 0
+
     return DashboardOverview(
         total_users=user_count,
         total_resumes=resume_count,
         total_job_profiles=job_count,
-        total_matches=0,
-        total_reports=0,
+        total_matches=matched_count,
+        total_reports=report_count,
         total_chat_sessions=chat_count,
     )
 
@@ -111,13 +127,13 @@ async def quality_distribution(
     # Count active vs inactive raw data
     active_count = (
         await db.execute(
-            select(func.count()).select_from(JobRawData).where(JobRawData.is_active == True)
+            select(func.count()).select_from(JobRawData).where(JobRawData.is_active.is_(True))
         )
     ).scalar() or 0
 
     inactive_count = (
         await db.execute(
-            select(func.count()).select_from(JobRawData).where(JobRawData.is_active == False)
+            select(func.count()).select_from(JobRawData).where(JobRawData.is_active.is_(False))
         )
     ).scalar() or 0
 
@@ -127,13 +143,27 @@ async def quality_distribution(
     ]
 
 
-@router.get("/match-stats", response_model=MatchStats)
-async def match_stats(
+@router.get("/snapshot-stats", response_model=SnapshotStats)
+async def snapshot_stats(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get matching statistics."""
-    raise HTTPException(status_code=501, detail="匹配统计依赖已删的 JobMatch 表，暂不提供")
+    """画像快照 / 匹配进度统计（替代原 /match-stats，D8）。"""
+    total = (
+        await db.execute(select(func.count()).select_from(ProfileSnapshot))
+    ).scalar() or 0
+    matched = (
+        await db.execute(
+            select(func.count())
+            .select_from(ProfileSnapshot)
+            .where(ProfileSnapshot.matched_at.isnot(None))
+        )
+    ).scalar() or 0
+    return SnapshotStats(
+        total_snapshots=total,
+        matched_snapshots=matched,
+        pending_snapshots=total - matched,
+    )
 
 
 @router.get("/system-health", response_model=SystemHealth)
@@ -149,13 +179,16 @@ async def system_health(
     except Exception:
         db_status = "unhealthy"
 
-    # Check scheduler
-    try:
-        from app.core.job_agent.scheduler.adaptive_scheduler import AdaptiveScheduler
-        scheduler = AdaptiveScheduler()
-        scheduler_status = "running" if scheduler.running else "stopped"
-    except Exception:
-        scheduler_status = "unknown"
+    # Check scheduler：读应用启动时挂载的实例（与 system.py 同口径），
+    # 不要现场 new —— 旧实现既漏跑依赖注入、又不存在公开的 running 属性，恒返回 unknown。
+    from app.main import app
+
+    scheduler = getattr(app.state, "scheduler", None)
+    if scheduler is None:
+        scheduler_status = "not_initialized"
+    else:
+        inner = getattr(scheduler, "_scheduler", None)
+        scheduler_status = "running" if getattr(inner, "running", False) else "stopped"
 
     # Check LLM gateway
     from app.core.llm.gateway import get_llm_gateway

@@ -310,10 +310,11 @@ class QualityDistribution(BaseModel):
     count: int
 
 
-class MatchStats(BaseModel):
-    avg_score: float
-    total_matches: int
-    feedback_count: int
+class SnapshotStats(BaseModel):
+    """画像快照/匹配进度（替代原 MatchStats：匹配明细已不落表，D8）。"""
+    total_snapshots: int
+    matched_snapshots: int
+    pending_snapshots: int
 
 
 class SystemHealth(BaseModel):
