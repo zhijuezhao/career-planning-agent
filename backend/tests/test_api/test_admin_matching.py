@@ -14,6 +14,18 @@ _test_engine = create_async_engine(_settings.database_url, poolclass=NullPool)
 
 _ts = str(int(time.time()))
 
+SNAPSHOT_FIELDS = {
+    "id",
+    "user_id",
+    "profile_id",
+    "serial_no",
+    "description",
+    "matched",
+    "matched_at",
+    "created_at",
+    "six_dim_scores",
+}
+
 
 @pytest.fixture(scope="module")
 def client():
@@ -36,56 +48,78 @@ def _create_user(client: TestClient, username: str) -> int:
     return asyncio.run(_get_user_id(username))
 
 
-class TestMatchResultsAPI:
-    def test_list_match_results(self, admin_token: str, client: TestClient):
-        """Test listing match results (501: depends on deleted JobMatch table)."""
+class TestSnapshotsAPI:
+    """S6/D9: /matching/results 与 /feedbacks 已被 /matching/snapshots 取代。"""
+
+    def test_list_snapshots(self, admin_token: str, client: TestClient):
         resp = client.get(
+            "/api/v1/admin/matching/snapshots?limit=100",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "total" in data
+        assert "items" in data
+        for item in data["items"]:
+            assert set(item) == SNAPSHOT_FIELDS
+            assert isinstance(item["six_dim_scores"], dict)
+
+    def test_filter_by_user(self, admin_token: str, client: TestClient):
+        resp = client.get(
+            "/api/v1/admin/matching/snapshots?user_id=1",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200
+        assert all(i["user_id"] == 1 for i in resp.json()["items"])
+
+    def test_filter_matched_consistent(self, admin_token: str, client: TestClient):
+        """matched 过滤必须与 matched_at 一致（true -> 非空，false -> 空）。"""
+        for flag, expect_matched in (("true", True), ("false", False)):
+            resp = client.get(
+                f"/api/v1/admin/matching/snapshots?matched={flag}&limit=100",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            assert resp.status_code == 200
+            for item in resp.json()["items"]:
+                assert item["matched"] is expect_matched
+                assert (item["matched_at"] is not None) is expect_matched
+
+    def test_get_snapshot_not_found(self, admin_token: str, client: TestClient):
+        resp = client.get(
+            "/api/v1/admin/matching/snapshots/999999",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 404
+
+    def test_get_snapshot_detail(self, admin_token: str, client: TestClient):
+        listing = client.get(
+            "/api/v1/admin/matching/snapshots?limit=1",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        items = listing.json()["items"]
+        if not items:
+            pytest.skip("库里暂无画像快照，跳过详情用例")
+
+        resp = client.get(
+            f"/api/v1/admin/matching/snapshots/{items[0]['id']}",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert set(data) == SNAPSHOT_FIELDS | {"five_layers", "form_raw", "embedding_dim"}
+        assert isinstance(data["five_layers"], dict)
+        assert isinstance(data["form_raw"], dict)
+
+    def test_legacy_endpoints_removed(self, admin_token: str, client: TestClient):
+        """原 /results 与 /feedbacks 已删除 -> 404（不是 501）。"""
+        for path in (
             "/api/v1/admin/matching/results",
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
-        assert resp.status_code == 501
-
-    def test_filter_match_results_by_user(self, admin_token: str, client: TestClient):
-        """Test filtering match results by user_id (501: deleted JobMatch table)."""
-        resp = client.get(
-            "/api/v1/admin/matching/results?user_id=1",
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
-        assert resp.status_code == 501
-
-    def test_get_match_result_not_found(self, admin_token: str, client: TestClient):
-        """Test getting a non-existent match result (501: deleted JobMatch table)."""
-        resp = client.get(
-            "/api/v1/admin/matching/results/999999",
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
-        assert resp.status_code == 501
-
-
-class TestFeedbacksAPI:
-    def test_list_feedbacks(self, admin_token: str, client: TestClient):
-        """Test listing feedbacks (501: depends on deleted UserFeedback table)."""
-        resp = client.get(
+            "/api/v1/admin/matching/results/1",
             "/api/v1/admin/matching/feedbacks",
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
-        assert resp.status_code == 501
-
-    def test_filter_feedbacks_by_type(self, admin_token: str, client: TestClient):
-        """Test filtering feedbacks by type (501: deleted UserFeedback table)."""
-        resp = client.get(
-            "/api/v1/admin/matching/feedbacks?feedback_type=like",
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
-        assert resp.status_code == 501
-
-    def test_get_feedback_not_found(self, admin_token: str, client: TestClient):
-        """Test getting a non-existent feedback (501: deleted UserFeedback table)."""
-        resp = client.get(
-            "/api/v1/admin/matching/feedbacks/999999",
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
-        assert resp.status_code == 501
+            "/api/v1/admin/matching/feedbacks/1",
+        ):
+            resp = client.get(path, headers={"Authorization": f"Bearer {admin_token}"})
+            assert resp.status_code == 404, f"{path} -> {resp.status_code}"
 
 
 class TestDimensionWeightsAPI:
@@ -210,9 +244,16 @@ class TestDimensionWeightsAPI:
 
 class TestMatchingAPIAuth:
     def test_non_admin_forbidden(self, student_token: str, client: TestClient):
-        """Test that non-admin users cannot access matching endpoints."""
+        """非管理员访问快照列表 -> 403。"""
         resp = client.get(
-            "/api/v1/admin/matching/results",
+            "/api/v1/admin/matching/snapshots",
+            headers={"Authorization": f"Bearer {student_token}"},
+        )
+        assert resp.status_code == 403
+
+    def test_non_admin_forbidden_weights(self, student_token: str, client: TestClient):
+        resp = client.get(
+            "/api/v1/admin/matching/weights",
             headers={"Authorization": f"Bearer {student_token}"},
         )
         assert resp.status_code == 403

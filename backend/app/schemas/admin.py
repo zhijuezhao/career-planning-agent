@@ -125,39 +125,31 @@ class JobRawDataListResponse(BaseModel):
     items: list[JobRawDataResponse]
 
 
-# ── Match Admin Schemas ─────────────────────────────────────────────────────
+# ── Snapshot Admin Schemas（原 MatchResult/Feedback：对应 JobMatch/UserFeedback 表已删除，D9）──
 
-class MatchResultResponse(BaseModel):
+class AdminSnapshotSummary(BaseModel):
+    """画像快照列表项（含匹配状态与六维分数摘要）。"""
     id: int
     user_id: int
     profile_id: int
-    job_profile_id: int
-    match_score: float | None
-    match_analysis: dict | None
+    serial_no: UUID
+    description: str
+    matched: bool
+    matched_at: datetime | None
     created_at: datetime
+    six_dim_scores: dict
 
-    model_config = {"from_attributes": True}
+
+class AdminSnapshotDetail(AdminSnapshotSummary):
+    """画像快照详情：含五层画像与原始表单；向量只回维度数，不回 1024 个浮点。"""
+    five_layers: dict
+    form_raw: dict
+    embedding_dim: int | None = None
 
 
-class MatchResultListResponse(BaseModel):
+class AdminSnapshotListResponse(BaseModel):
     total: int
-    items: list[MatchResultResponse]
-
-
-class FeedbackResponse(BaseModel):
-    id: int
-    user_id: int
-    match_id: int
-    feedback_type: str | None
-    comment: str | None
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class FeedbackListResponse(BaseModel):
-    total: int
-    items: list[FeedbackResponse]
+    items: list[AdminSnapshotSummary]
 
 
 # ── Dimension Weight Admin Schemas ──────────────────────────────────────────
