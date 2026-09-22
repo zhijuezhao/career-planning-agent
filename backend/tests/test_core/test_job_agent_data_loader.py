@@ -79,3 +79,50 @@ class TestLoadExcelData:
     async def test_is_tool_instance(self):
         assert isinstance(load_excel_data, BaseTool)
         assert load_excel_data.name == "load_excel_data"
+
+
+class TestLoadCsvData:
+    """S7-2（D-S7-2=A）：上传入口允许 .csv，data_loader 必须有 CSV 分支。"""
+
+    @pytest.mark.asyncio
+    async def test_csv_chinese_headers_are_mapped(self, tmp_path):
+        path = tmp_path / "jobs.csv"
+        path.write_text("岗位名称,公司名称,工作城市\n数据分析师,A公司,北京\n", encoding="utf-8")
+
+        result = await load_excel_data.ainvoke({"file_path": str(path)})
+
+        assert result["total"] == 1
+        assert result["rows"][0]["title"] == "数据分析师"
+        assert result["rows"][0]["company"] == "A公司"
+        assert result["rows"][0]["city"] == "北京"
+
+    @pytest.mark.asyncio
+    async def test_csv_gbk_is_decoded_via_fallback(self, tmp_path):
+        path = tmp_path / "gbk.csv"
+        path.write_bytes("岗位名称,公司名称\n后端工程师,B公司\n".encode("gbk"))
+
+        result = await load_excel_data.ainvoke({"file_path": str(path)})
+
+        assert result["total"] == 1
+        assert result["rows"][0]["title"] == "后端工程师"
+
+    @pytest.mark.asyncio
+    async def test_csv_respects_nrows_limit(self, tmp_path):
+        path = tmp_path / "many.csv"
+        path.write_text(
+            "岗位名称\n" + "\n".join(f"岗位{i}" for i in range(5)) + "\n", encoding="utf-8"
+        )
+
+        result = await load_excel_data.ainvoke({"file_path": str(path), "nrows": 2})
+
+        assert result["total"] == 2
+
+    @pytest.mark.asyncio
+    async def test_header_only_csv_returns_empty(self, tmp_path):
+        path = tmp_path / "empty.csv"
+        path.write_text("岗位名称,公司名称\n", encoding="utf-8")
+
+        result = await load_excel_data.ainvoke({"file_path": str(path)})
+
+        assert result["total"] == 0
+        assert result["rows"] == []
