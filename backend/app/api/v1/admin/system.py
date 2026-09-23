@@ -15,8 +15,10 @@ from app.core.llm.registry import (
     FUNCTION_KEY_MAP,
     FUNCTION_KEYS,
     FunctionKeyMeta,
+    get_registry_snapshot,
     invalidate_llm_registry,
     reload_registry,
+    resolve_env_model,
 )
 from app.core.llm.secrets import decrypt_secret, encrypt_secret, mask_secret
 from app.domain.models.llm_config import LLMModel, LLMProvider, LLMRoute
@@ -458,14 +460,35 @@ async def delete_llm_model(
 # ── 功能路由 ────────────────────────────────────────────────────────────────
 
 
+def _runtime_default_hint() -> str:
+    """运行时真正兜底的模型名。
+
+    DB 一旦有可用 chat 模型（且未绑 default 路由），网关默认取第一个 DB 模型，
+    此时 env `llm_default_model` 已不参与 —— 页面必须跟着说真话，否则管理员会误判。
+    """
+    snapshot = get_registry_snapshot()
+    if snapshot is not None and snapshot.chat_configs:
+        return snapshot.default_gateway_key or (
+            snapshot.fallback_order[0] if snapshot.fallback_order else "（无可用模型）"
+        )
+    return get_settings().llm_default_model
+
+
 def _env_effective(meta: FunctionKeyMeta) -> str:
     settings = get_settings()
     if meta.kind == "embedding":
         fallback_model = settings.embedding_model or settings.siliconflow_embedding_model
         return f"env EMBEDDING_*（当前：{fallback_model or '未配置'}）"
+    env_model = resolve_env_model(meta.key)  # 目前仅 resume_parse 有（B4-1）
+    if env_model:
+        return f"env {meta.env_setting}（当前：{env_model}）"
+    snapshot = get_registry_snapshot()
+    db_default = snapshot is not None and bool(snapshot.chat_configs)
     if meta.key == "default":
+        if db_default:
+            return f"未绑 default → 运行时取第一个可用 DB 模型（当前：{_runtime_default_hint()}）"
         return f"env llm_default_model（当前：{settings.llm_default_model}）"
-    return f"跟随 default（当前：{settings.llm_default_model}）"
+    return f"跟随 default（当前：{_runtime_default_hint()}）"
 
 
 def _route_response(
@@ -479,6 +502,8 @@ def _route_response(
         f"{provider.name}:{model.model_name}" if model is not None and provider is not None else None
     )
     warning: str | None = None
+    # 可绑定但调用点还没接：配置是「存下来」了，但不能说它生效
+    unwired_warning = "调用点尚未接入（B3-2 链接解析才用到），绑定暂不生效" if not meta.wired else None
 
     if route is None:
         pass  # 未配置 → env
@@ -497,12 +522,13 @@ def _route_response(
             function_key=meta.key,
             label=meta.label,
             kind=meta.kind,
+            wired=meta.wired,
             bound_model_id=model.id,
             bound_model=bound_model,
             source="db",
             effective=bound_model or "",
             fallback=meta.fallback,
-            warning=None,
+            warning=unwired_warning,
             updated_at=route.updated_at,
         )
 
@@ -513,12 +539,13 @@ def _route_response(
         function_key=meta.key,
         label=meta.label,
         kind=meta.kind,
+        wired=meta.wired,
         bound_model_id=model.id if model is not None else None,
         bound_model=bound_model,
         source="env",
         effective=_env_effective(meta),
         fallback=meta.fallback,
-        warning=warning,
+        warning=warning or unwired_warning,
         updated_at=route.updated_at if route is not None else None,
     )
 

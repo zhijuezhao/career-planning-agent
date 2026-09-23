@@ -40,6 +40,8 @@ class FunctionKeyMeta:
     label: str
     kind: str  # chat | embedding
     fallback: str  # 未配置时的回退说明（前端「来源：DB/env」展示用）
+    wired: bool = True  # 调用点是否已接入（False = 可绑定但暂不生效，界面会提示）
+    env_setting: str | None = None  # 未绑定时可回退的 env 配置项名（如 resume_llm_model）
 
 
 FUNCTION_KEYS: tuple[FunctionKeyMeta, ...] = (
@@ -47,12 +49,37 @@ FUNCTION_KEYS: tuple[FunctionKeyMeta, ...] = (
     FunctionKeyMeta("job_quality", "导入-质检", "chat", "default"),
     FunctionKeyMeta("job_extract", "导入-结构化提取", "chat", "default"),
     FunctionKeyMeta("job_portrait", "导入-画像", "chat", "default"),
-    FunctionKeyMeta("job_link_extract", "链接字段解析（LLM + XPath）", "chat", "default"),
-    FunctionKeyMeta("resume_parse", "简历解析", "chat", "default"),
+    # B3-2 才接调用点：现在可绑定，但不会生效（wired=False 会在「功能路由」页提示）
+    FunctionKeyMeta("job_link_extract", "链接字段解析（LLM + XPath）", "chat", "default", wired=False),
+    # B4-1：未绑定时回退 env `resume_llm_model`（历史配置项，此前从未被读取）
+    FunctionKeyMeta(
+        "resume_parse",
+        "简历解析",
+        "chat",
+        "env resume_llm_model → default",
+        env_setting="resume_llm_model",
+    ),
     FunctionKeyMeta("embedding", "向量模型", "embedding", "env EMBEDDING_* → SiliconFlow"),
 )
 
 FUNCTION_KEY_MAP: dict[str, FunctionKeyMeta] = {meta.key: meta for meta in FUNCTION_KEYS}
+
+
+def resolve_env_model(function_key: str | None) -> str | None:
+    """功能键未绑 DB 时可回退的 env 模型名（网关内的模型 key，如 "qwen"）。
+
+    目前只有 `resume_parse` 有这类历史配置（`settings.resume_llm_model`）。
+    返回的名字**不保证**在当前网关注册表里存在，调用方需再校验。
+    """
+    if not function_key:
+        return None
+    meta = FUNCTION_KEY_MAP.get(function_key)
+    if meta is None or not meta.env_setting:
+        return None
+    value = getattr(get_settings(), meta.env_setting, None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def gateway_key(provider_name: str, model_name: str) -> str:
@@ -284,6 +311,7 @@ __all__ = [
     "invalidate_llm_registry",
     "load_snapshot",
     "reload_registry",
+    "resolve_env_model",
     "resolve_route",
     "set_registry_snapshot",
 ]

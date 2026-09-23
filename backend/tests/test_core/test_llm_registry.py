@@ -7,8 +7,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from app.core.llm.embeddings import (
+    VECTOR_DIM,
+    DimCheckedEmbeddings,
+    EmbeddingDimError,
+    clear_embeddings_cache,
+    ensure_vector_dim,
+    get_embeddings,
+)
 from app.core.llm.gateway import LLMGateway, clear_gateway_cache
 from app.core.llm.registry import (
     RegistrySnapshot,
@@ -20,6 +30,7 @@ from app.core.llm.registry import (
 from app.core.llm.secrets import decrypt_secret, encrypt_secret, is_encrypted, mask_secret
 from app.domain.models.llm_config import LLMModel, LLMProvider, LLMRoute
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessage
 
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -333,3 +344,174 @@ class TestRouteSpec:
         spec = _route_spec()
         assert spec.gateway_key == "prov:chat-model"
         assert spec.label == "prov:chat-model"
+
+
+# ── B4-1：embedding 维度兜底 ────────────────────────────────────────────────
+
+
+class _FakeEmbeddingClient:
+    """最小 embedding 客户端替身（记录调用，可指定返回维度）。"""
+
+    def __init__(self, dim: int):
+        self.dim = dim
+        self.model = "fake-embedding-model"
+
+    async def aembed_query(self, text: str):
+        return [0.1] * self.dim
+
+    async def aembed_documents(self, texts):
+        return [[0.1] * self.dim for _ in texts]
+
+
+class TestEmbeddingDimGuard:
+    def test_ok_vector_passes_through(self):
+        vector = [0.0] * VECTOR_DIM
+        assert ensure_vector_dim(vector) is vector
+
+    def test_mismatch_raises_with_actionable_message(self):
+        with pytest.raises(EmbeddingDimError) as exc:
+            ensure_vector_dim([0.0] * 768, source="unit-test")
+        message = str(exc.value)
+        assert "768" in message and "1024" in message and "unit-test" in message
+
+    def test_none_raises(self):
+        with pytest.raises(EmbeddingDimError):
+            ensure_vector_dim(None)
+
+    async def test_wrapper_passes_ok_query(self):
+        client = DimCheckedEmbeddings(_FakeEmbeddingClient(VECTOR_DIM))
+        vector = await client.aembed_query("文本")
+        assert len(vector) == VECTOR_DIM
+
+    async def test_wrapper_rejects_wrong_query_dim(self):
+        client = DimCheckedEmbeddings(_FakeEmbeddingClient(1536))
+        with pytest.raises(EmbeddingDimError):
+            await client.aembed_query("文本")
+
+    async def test_wrapper_rejects_wrong_document_dim_with_index(self):
+        client = DimCheckedEmbeddings(_FakeEmbeddingClient(768))
+        with pytest.raises(EmbeddingDimError) as exc:
+            await client.aembed_documents(["一", "二"])
+        assert "aembed_documents[0]" in str(exc.value)
+
+    async def test_wrapper_passes_ok_documents(self):
+        client = DimCheckedEmbeddings(_FakeEmbeddingClient(VECTOR_DIM))
+        vectors = await client.aembed_documents(["一", "二"])
+        assert [len(v) for v in vectors] == [VECTOR_DIM, VECTOR_DIM]
+
+    def test_wrapper_passes_through_other_attributes(self):
+        client = DimCheckedEmbeddings(_FakeEmbeddingClient(VECTOR_DIM))
+        assert client.model == "fake-embedding-model"
+        assert isinstance(client.inner, _FakeEmbeddingClient)
+
+
+class TestGetEmbeddingsUsesRegistry:
+    """B4-1 验收：切换 DB 里的向量模型后，get_embeddings() 真的换模型（并清缓存）。"""
+
+    def _snapshot(self, model_name: str) -> RegistrySnapshot:
+        return RegistrySnapshot(
+            version=7,
+            loaded_at=_NOW,
+            routes={
+                "embedding": RouteSpec(
+                    function_key="embedding",
+                    provider_id=1,
+                    provider_name="prov",
+                    model_id=9,
+                    model_name=model_name,
+                    kind="embedding",
+                    base_url="http://127.0.0.1:9/v1",
+                    api_key="sk-abcdefgh1234",
+                    temperature=0.0,
+                    max_tokens=0,
+                    dim=VECTOR_DIM,
+                )
+            },
+            chat_configs={},
+            fallback_order=(),
+            chat_labels={},
+        )
+
+    def test_db_route_drives_client(self, monkeypatch):
+        captured: dict[str, str] = {}
+
+        def fake_build_embeddings(*, model: str, api_key: str, base_url: str):
+            captured.update(model=model, api_key=api_key, base_url=base_url)
+            return _FakeEmbeddingClient(VECTOR_DIM)
+
+        monkeypatch.setattr("app.core.llm.embeddings.build_embeddings", fake_build_embeddings)
+        set_registry_snapshot(self._snapshot("embed-model-x"))
+        clear_embeddings_cache()
+        try:
+            client = get_embeddings()
+            assert captured["model"] == "embed-model-x"
+            assert captured["api_key"] == "sk-abcdefgh1234"
+            assert client.model == "fake-embedding-model"  # 透传内层
+        finally:
+            clear_registry_snapshot()
+            clear_embeddings_cache()
+
+
+# ── B4-1：resume_parse 的 env 回退与调用点接线 ──────────────────────────────
+
+
+class TestResumeParseFallback:
+    def test_env_model_used_when_db_empty(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.core.llm.registry.get_settings",
+            lambda: SimpleNamespace(resume_llm_model="qwen"),
+        )
+        gateway = LLMGateway(
+            models={
+                "qwen": FakeListChatModel(responses=["x"]),
+                "deepseek": FakeListChatModel(responses=["y"]),
+            },
+            default_model="deepseek",
+        )
+        assert gateway.resolve_function_key("resume_parse") == "qwen"
+        # 其他功能键没有 env 回退，仍然回落默认
+        assert gateway.resolve_function_key("job_extract") is None
+
+    def test_env_model_missing_from_registry_falls_back(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.core.llm.registry.get_settings",
+            lambda: SimpleNamespace(resume_llm_model="ghost-model"),
+        )
+        gateway = LLMGateway(models={"deepseek": FakeListChatModel(responses=["y"])})
+        assert gateway.resolve_function_key("resume_parse") is None
+
+    def test_db_route_beats_env(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.core.llm.registry.get_settings",
+            lambda: SimpleNamespace(resume_llm_model="qwen"),
+        )
+        snapshot = RegistrySnapshot(
+            version=8,
+            loaded_at=_NOW,
+            routes={"resume_parse": _route_spec("resume_parse")},
+            chat_configs={"prov:chat-model": _chat_config()},
+            fallback_order=("prov:chat-model",),
+            chat_labels={},
+        )
+        set_registry_snapshot(snapshot)
+        clear_gateway_cache()
+        try:
+            gateway = LLMGateway()
+            assert gateway.config_source == "db"
+            assert gateway.resolve_function_key("resume_parse") == "prov:chat-model"
+        finally:
+            clear_registry_snapshot()
+            clear_gateway_cache()
+
+    async def test_resume_parser_passes_function_key(self, monkeypatch):
+        """调用点确实把 function_key 传给了网关（否则上面的路由全是摆设）。"""
+        from app.core.resume_agent.tools import resume_parser as module
+
+        mock_gateway = AsyncMock()
+        mock_gateway.ainvoke = AsyncMock(return_value=AIMessage(content='{"basic_info": {}}'))
+        monkeypatch.setattr(module, "get_llm_gateway", lambda: mock_gateway)
+
+        result = await module._parse_resume("这是一段简历文本")
+
+        assert result["basic_info"]["age"] is None  # 默认结构被填齐（非失败）
+        assert mock_gateway.ainvoke.await_args.kwargs["function_key"] == "resume_parse"

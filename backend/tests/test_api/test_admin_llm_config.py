@@ -13,7 +13,7 @@ import asyncio
 import time
 
 import pytest
-from app.core.llm.embeddings import get_embeddings
+from app.core.llm.embeddings import clear_embeddings_cache, get_embeddings
 from app.core.llm.gateway import clear_gateway_cache, get_llm_gateway
 from app.core.llm.registry import (
     clear_registry_snapshot,
@@ -560,3 +560,71 @@ class TestConnectivity:
             "/api/v1/admin/system/models/99999999/test", headers=_headers(admin_token)
         )
         assert resp.status_code == 404
+
+
+# ── B4-1：简历解析 / embedding 的配置来源切换 ────────────────────────────────
+
+
+class TestB41Wiring:
+    def test_routes_expose_wired_flag(self, client, admin_token):
+        routes = _routes(client, admin_token)
+        # job_link_extract 的调用点在 B3-2 才接 → 可绑定但不生效
+        assert routes["job_link_extract"]["wired"] is False
+        for key in ("default", "job_quality", "job_extract", "job_portrait", "resume_parse", "embedding"):
+            assert routes[key]["wired"] is True, key
+
+    def test_bind_resume_parse_is_effective(self, client, admin_token, provider, chat_model):
+        key = f"{provider['name']}:{chat_model['model_name']}"
+        try:
+            resp = _bind(client, admin_token, "resume_parse", chat_model["id"])
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["source"] == "db"
+            assert body["effective"] == key
+            assert body["warning"] is None
+            assert get_llm_gateway().resolve_function_key("resume_parse") == key
+        finally:
+            assert _bind(client, admin_token, "resume_parse", None).status_code == 200
+
+        assert get_llm_gateway().resolve_function_key("resume_parse") is None
+
+    def test_unwired_route_binds_but_warns(self, client, admin_token, chat_model):
+        try:
+            resp = _bind(client, admin_token, "job_link_extract", chat_model["id"])
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["wired"] is False
+            assert body["warning"] and "尚未接入" in body["warning"]
+        finally:
+            assert _bind(client, admin_token, "job_link_extract", None).status_code == 200
+
+    def test_unbound_default_reports_db_runtime_default(self, client, admin_token, provider, chat_model):
+        """DB 有模型但未绑 default 时，页面必须说清"运行时取第一个 DB 模型"，不能还写 env 名字。"""
+        key = f"{provider['name']}:{chat_model['model_name']}"
+        routes = _routes(client, admin_token)
+        assert routes["default"]["source"] == "env"  # 没绑就是没绑
+        assert key in routes["default"]["effective"]
+        assert key in routes["job_quality"]["effective"]
+        assert get_llm_gateway().current_model == key  # 页面所述 = 网关真实行为
+
+    def test_embedding_route_feeds_get_embeddings(self, client, admin_token, embed_model, monkeypatch):
+        """绑定 embedding 路由后，get_embeddings() 构造参数应换成 DB 里的模型。"""
+        captured: dict[str, str] = {}
+
+        def fake_build_embeddings(*, model: str, api_key: str, base_url: str):
+            captured.update(model=model, api_key=api_key, base_url=base_url)
+
+            class _Client:
+                async def aembed_query(self, text):
+                    return [0.0] * 1024
+
+            return _Client()
+
+        monkeypatch.setattr("app.core.llm.embeddings.build_embeddings", fake_build_embeddings)
+        try:
+            assert _bind(client, admin_token, "embedding", embed_model["id"]).status_code == 200
+            get_embeddings()
+            assert captured["model"] == embed_model["model_name"]
+        finally:
+            assert _bind(client, admin_token, "embedding", None).status_code == 200
+            clear_embeddings_cache()

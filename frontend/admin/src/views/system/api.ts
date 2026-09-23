@@ -39,6 +39,8 @@ export interface FunctionRoute {
   function_key: string
   label: string
   kind: 'chat' | 'embedding'
+  /** 调用点是否已接入；false = 可绑定但暂不生效（如 job_link_extract 等 B3-2） */
+  wired: boolean
   bound_model_id: number | null
   bound_model: string | null
   source: 'db' | 'env'

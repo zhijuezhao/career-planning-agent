@@ -26,7 +26,7 @@ from app.core.llm.models import (
     build_provider_configs,
     create_chat_model,
 )
-from app.core.llm.registry import get_registry_snapshot
+from app.core.llm.registry import get_registry_snapshot, resolve_env_model
 
 
 class LLMGatewayError(RuntimeError):
@@ -132,14 +132,24 @@ class LLMGateway:
         return dict(self._function_routes)
 
     def resolve_function_key(self, function_key: str | None) -> str | None:
-        """把功能键解析成已注册的模型 key；未配置或不可用返回 None（调用方回落默认）。"""
+        """把功能键解析成已注册的模型 key；未配置或不可用返回 None（调用方回落默认）。
+
+        优先级（B4-1）：DB 绑定 > env 回退（仅 `resume_parse` 有 `resume_llm_model`）> 默认模型。
+        """
         if not function_key:
             return None
         name = self._function_routes.get(function_key)
-        if name is None or name not in self._models:
-            logger.debug("功能键 {} 未绑定可用模型，回落默认 {}", function_key, self._current_model)
-            return None
-        return name
+        if name is not None and name in self._models:
+            return name
+        if name is not None:
+            logger.warning("功能键 {} 绑定的模型 {} 不在本次网关注册表，回落默认", function_key, name)
+
+        env_name = resolve_env_model(function_key)
+        if env_name is not None and env_name in self._models:
+            logger.debug("功能键 {} 未绑定 DB 路由，使用 env 配置模型 {}", function_key, env_name)
+            return env_name
+        logger.debug("功能键 {} 未绑定可用模型，回落默认 {}", function_key, self._current_model)
+        return None
 
     def get_model(self, model_name: str | None = None) -> BaseChatModel:
         """返回指定模型（或当前默认）的原始 BaseChatModel。

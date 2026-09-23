@@ -28,7 +28,9 @@ async def _parse_resume(resume_text: str) -> dict:
     gateway = get_llm_gateway()
     messages = build_resume_parsing_messages(resume_text)
 
-    response = await gateway.ainvoke(messages)
+    # function_key="resume_parse"：由管理端「系统配置 > 功能路由」绑定（B4-1）；
+    # 未绑定则回退 env `resume_llm_model`，都没有则用网关默认模型。
+    response = await gateway.ainvoke(messages, function_key="resume_parse")
     raw_content = response.content if isinstance(response.content, str) else str(response.content)
 
     try:

@@ -46,12 +46,14 @@ const save = async (row: FunctionRoute) => {
   try {
     const modelId = draft[row.function_key] ?? null
     const res = await bindRoute(row.function_key, modelId)
-    if (res.source === 'db') {
+    if (res.warning) {
+      ElMessage.warning(`已保存：${res.warning}`)
+    } else if (res.source === 'db') {
       ElMessage.success(`已生效：${res.effective}`)
     } else if (modelId === null) {
       ElMessage.success('已解绑，回退 env 默认')
     } else {
-      ElMessage.warning(`已绑定但尚未生效：${res.warning ?? '配置不完整'}`)
+      ElMessage.warning('已绑定但尚未生效，请检查供应商密钥/模型状态')
     }
     await fetchData()
   } catch {
@@ -72,7 +74,7 @@ watch(() => props.reloadToken, fetchData)
       :closable="false"
       show-icon
       title="绑定后立即生效，不需要重启后端"
-      description="未绑定或绑定失效时自动回退 env 默认模型；把下拉清空再保存即为解绑。"
+      description="未绑定或绑定失效时自动回退 env 默认（简历解析额外回退 env RESUME_LLM_MODEL）；把下拉清空再保存即为解绑。标「待接入」的功能键调用点还没接，绑了暂不生效。"
       class="hint"
     />
 
@@ -94,6 +96,14 @@ watch(() => props.reloadToken, fetchData)
           <el-tag size="small" :type="row.kind === 'embedding' ? 'warning' : 'primary'">
             {{ row.kind === 'embedding' ? '向量' : '对话' }}
           </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="调用点" width="110">
+        <template #default="{ row }">
+          <el-tag v-if="row.wired" size="small" type="success">已接入</el-tag>
+          <el-tooltip v-else content="调用点尚未接入（B3-2 链接解析才用到），绑定后暂不生效" placement="top">
+            <el-tag size="small" type="info">待接入</el-tag>
+          </el-tooltip>
         </template>
       </el-table-column>
       <el-table-column label="绑定模型" min-width="260">

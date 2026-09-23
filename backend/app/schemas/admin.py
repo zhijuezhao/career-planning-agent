@@ -472,6 +472,7 @@ class FunctionRouteResponse(BaseModel):
     function_key: str
     label: str
     kind: str
+    wired: bool = True           # 调用点是否已接入（False = 绑定也不生效，B3-2 才接）
     bound_model_id: int | None = None
     bound_model: str | None = None
     source: str = "env"          # db | env
