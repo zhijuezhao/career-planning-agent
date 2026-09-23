@@ -56,6 +56,20 @@ async def node_load_data(state: JobImportState) -> dict:
         "sheet_name": state.get("sheet_name", 0),
         "nrows": state.get("nrows"),
     })
+
+    # S7-3 修复：读取失败必须显式冒泡。
+    # `load_excel_data` 失败时返回 {"total": 0, "rows": [], "error": "..."}，
+    # 原先只取 rows → 损坏/不可读的文件会被当成「空表」一路跑完并报 completed，
+    # 调用方看不到任何原因（实测：64 字节垃圾 .xlsx 被判 completed）。
+    if result.get("error"):
+        logger.error("Import: data load failed | error={}", result["error"])
+        return {
+            "raw_rows": [],
+            "total_input": 0,
+            "status": "failed",
+            "error_message": str(result["error"]),
+        }
+
     raw_rows = result.get("rows", [])
     logger.info("Import: data loaded | rows={}", len(raw_rows))
     return {

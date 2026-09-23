@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.admin import _import_runner
 from app.api.v1.admin.auth import require_admin
 from app.domain.models.import_job import DataImportJob
 from app.domain.models.user import User
@@ -235,43 +236,10 @@ async def process_import_job(
 
 
 async def _process_import(job_id: int) -> None:
-    """后台任务：定位上传文件 → 统计真实行数 → 落终态。
+    """后台任务入口（薄适配层）：定位上传文件后交给 runner 执行。
 
-    S7-1 范围仅「文件定位 + 真实行数 + 状态机」：**不跑 6 阶段流水线、不写库**，
-    因此不会产生任何 job_raw_data / job_profiles 记录（原实现造 100 条假岗位已删除）。
+    S7-3 起真正的执行逻辑在 :mod:`app.api.v1.admin._import_runner`
+    （6 阶段流水线、阶段级进度、计数映射、失败落库）。
+    本函数只负责「把 API 层的上传目录约定翻译成一个 Path」。
     """
-    from app.core.job_agent.tools.data_loader import load_excel_data
-
-    async with async_session_factory() as session:
-        job = await session.get(DataImportJob, job_id)
-        if job is None:
-            return
-
-        file_path = _find_upload_file(job_id)
-        if file_path is None:
-            job.status = "failed"
-            job.errors = [f"未找到上传文件：uploads/import/{job_id}_*"]
-            job.error_count = 0
-            await session.commit()
-            return
-
-        try:
-            result = await load_excel_data.ainvoke({"file_path": str(file_path)})
-            if result.get("error"):
-                raise RuntimeError(str(result["error"]))
-
-            total = int(result.get("total") or 0)
-            job.total_rows = total
-            job.processed_rows = total
-            # S7-1 的 success_count 语义 = 成功解析（读取）的行数；
-            # S7-3/S7-4 接入流水线与落库后会改写为「通过质检 / 实际落库」条数。
-            job.success_count = total
-            job.error_count = 0
-            job.errors = []
-            job.status = "completed"
-        except Exception as exc:
-            job.status = "failed"
-            job.errors = [str(exc)]
-            job.error_count = max(job.total_rows - job.processed_rows, 0)
-
-        await session.commit()
+    await _import_runner.run_import_job(job_id, _find_upload_file(job_id))
