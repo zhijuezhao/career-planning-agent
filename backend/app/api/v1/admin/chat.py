@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
@@ -28,16 +30,30 @@ async def list_chat_sessions(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     user_id: int | None = None,
+    start: datetime | None = Query(None, description="创建时间下限（含），ISO8601"),
+    end: datetime | None = Query(None, description="创建时间上限（含），ISO8601"),
+    keyword: str | None = Query(None, description="按标题或摘要模糊搜索"),
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List chat sessions with optional filtering."""
+    """会话列表（P1-5：支持时间范围与关键字筛选）。"""
     query = select(ChatSession)
     count_query = select(func.count()).select_from(ChatSession)
 
     if user_id is not None:
         query = query.where(ChatSession.user_id == user_id)
         count_query = count_query.where(ChatSession.user_id == user_id)
+    if start is not None:
+        query = query.where(ChatSession.created_at >= start)
+        count_query = count_query.where(ChatSession.created_at >= start)
+    if end is not None:
+        query = query.where(ChatSession.created_at <= end)
+        count_query = count_query.where(ChatSession.created_at <= end)
+    if keyword:
+        like = f"%{keyword}%"
+        cond = or_(ChatSession.title.like(like), ChatSession.summary.like(like))
+        query = query.where(cond)
+        count_query = count_query.where(cond)
 
     total = (await db.execute(count_query)).scalar() or 0
 
@@ -87,16 +103,35 @@ async def list_chat_messages(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     session_id: UUID | None = None,
+    role: Literal["user", "assistant", "system"] | None = Query(
+        None, description="角色过滤（非法值自动 422）"
+    ),
+    start: datetime | None = Query(None, description="创建时间下限（含），ISO8601"),
+    end: datetime | None = Query(None, description="创建时间上限（含），ISO8601"),
+    keyword: str | None = Query(None, description="按消息内容模糊搜索"),
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List chat messages with optional filtering."""
+    """消息列表（P1-5：支持会话/角色/时间范围/关键字筛选）。"""
     query = select(ChatMessage)
     count_query = select(func.count()).select_from(ChatMessage)
 
     if session_id is not None:
         query = query.where(ChatMessage.session_id == session_id)
         count_query = count_query.where(ChatMessage.session_id == session_id)
+    if role is not None:
+        query = query.where(ChatMessage.role == role)
+        count_query = count_query.where(ChatMessage.role == role)
+    if start is not None:
+        query = query.where(ChatMessage.created_at >= start)
+        count_query = count_query.where(ChatMessage.created_at >= start)
+    if end is not None:
+        query = query.where(ChatMessage.created_at <= end)
+        count_query = count_query.where(ChatMessage.created_at <= end)
+    if keyword:
+        like = f"%{keyword}%"
+        query = query.where(ChatMessage.content.like(like))
+        count_query = count_query.where(ChatMessage.content.like(like))
 
     total = (await db.execute(count_query)).scalar() or 0
 
