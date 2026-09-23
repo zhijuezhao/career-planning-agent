@@ -128,9 +128,14 @@ class JobRawDataListResponse(BaseModel):
 # ── Snapshot Admin Schemas（原 MatchResult/Feedback：对应 JobMatch/UserFeedback 表已删除，D9）──
 
 class AdminSnapshotSummary(BaseModel):
-    """画像快照列表项（含匹配状态与六维分数摘要）。"""
+    """画像快照列表项（含匹配状态与六维分数摘要）。
+
+    P1-4 起补 `username`（LEFT JOIN users）与 `report_count`：
+    管理端要显示「谁生成的」以及删除时提示「会连带删掉几份报告」。
+    """
     id: int
     user_id: int
+    username: str | None = None
     profile_id: int
     serial_no: UUID
     description: str
@@ -138,6 +143,7 @@ class AdminSnapshotSummary(BaseModel):
     matched_at: datetime | None
     created_at: datetime
     six_dim_scores: dict
+    report_count: int = 0
 
 
 class AdminSnapshotDetail(AdminSnapshotSummary):
@@ -145,6 +151,18 @@ class AdminSnapshotDetail(AdminSnapshotSummary):
     five_layers: dict
     form_raw: dict
     embedding_dim: int | None = None
+
+
+class AdminSnapshotUpdate(BaseModel):
+    """快照可改字段（P1-4，仅这两项）。
+
+    ⚠️ 改 `five_layers` **不会**重算 embedding 与六维分数 —— 向量仍对应快照生成时的画像。
+    `extra="forbid"`：传了别的字段（如 embedding）直接 422，避免"发了却没生效"的迷惑。
+    """
+    description: str | None = Field(None, max_length=255)
+    five_layers: dict | None = None
+
+    model_config = {"extra": "forbid"}
 
 
 class AdminSnapshotListResponse(BaseModel):

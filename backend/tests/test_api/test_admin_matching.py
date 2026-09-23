@@ -3,20 +3,25 @@ import time
 
 import pytest
 from app.config import get_settings
+from app.domain.models.profile_snapshot import ProfileSnapshot
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 _settings = get_settings()
 _test_engine = create_async_engine(_settings.database_url, poolclass=NullPool)
+_probe_session_factory = async_sessionmaker(
+    _test_engine, class_=AsyncSession, expire_on_commit=False
+)
 
 _ts = str(int(time.time()))
 
 SNAPSHOT_FIELDS = {
     "id",
     "user_id",
+    "username",  # P1-4：LEFT JOIN users
     "profile_id",
     "serial_no",
     "description",
@@ -24,6 +29,7 @@ SNAPSHOT_FIELDS = {
     "matched_at",
     "created_at",
     "six_dim_scores",
+    "report_count",  # P1-4：关联报告数（删除前提示用）
 }
 
 
@@ -257,3 +263,140 @@ class TestMatchingAPIAuth:
             headers={"Authorization": f"Bearer {student_token}"},
         )
         assert resp.status_code == 403
+
+
+class TestSnapshotAdminOps:
+    """P1-4：下载 / 修改 / 删除。
+
+    做法：**克隆**一条既有快照（复用其 user_id/profile_id，向量置零）作为测试对象，
+    全程不碰真实快照数据；每个用例结束前删掉自己那条。
+    """
+
+    _CLONE_DESCRIPTION = "p1-4-clone"
+
+    @staticmethod
+    async def _clone() -> int | None:
+        async with _probe_session_factory() as session:
+            src = (await session.execute(select(ProfileSnapshot).limit(1))).scalars().first()
+            if src is None:
+                return None
+            clone = ProfileSnapshot(
+                user_id=src.user_id,
+                profile_id=src.profile_id,
+                form_raw_json={"__test__": True},
+                five_layers_json={"基础信息": {"姓名": "P1-4 测试"}},
+                six_dim_scores_json={"技能": 4.0},
+                embedding=[0.0] * 1024,
+                description=TestSnapshotAdminOps._CLONE_DESCRIPTION,
+            )
+            session.add(clone)
+            await session.commit()
+            await session.refresh(clone)
+            return clone.id
+
+    def _clone_id(self) -> int:
+        snapshot_id = asyncio.run(self._clone())
+        if snapshot_id is None:
+            pytest.skip("库里没有任何快照，无法克隆测试对象")
+        return snapshot_id
+
+    @staticmethod
+    def _headers(token: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {token}"}
+
+    def _drop(self, client: TestClient, token: str, snapshot_id: int) -> None:
+        client.delete(
+            f"/api/v1/admin/matching/snapshots/{snapshot_id}",
+            headers=self._headers(token),
+        )
+
+    def test_download_returns_markdown(self, admin_token: str, client: TestClient):
+        snapshot_id = self._clone_id()
+        try:
+            resp = client.get(
+                f"/api/v1/admin/matching/snapshots/{snapshot_id}/download",
+                headers=self._headers(admin_token),
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.headers["content-type"].startswith("text/markdown")
+            disposition = resp.headers["content-disposition"]
+            assert "attachment" in disposition
+            assert "filename*=UTF-8''" in disposition  # RFC 5987 中文名
+            assert resp.text.startswith("# 画像快照 ")
+            assert "## 五层画像" in resp.text
+            assert "P1-4 测试" in resp.text
+        finally:
+            self._drop(client, admin_token, snapshot_id)
+
+    def test_update_description_and_five_layers(self, admin_token: str, client: TestClient):
+        snapshot_id = self._clone_id()
+        url = f"/api/v1/admin/matching/snapshots/{snapshot_id}"
+        try:
+            resp = client.put(
+                url,
+                json={
+                    "description": "改过的备注",
+                    "five_layers": {"基础信息": {"姓名": "李四"}},
+                },
+                headers=self._headers(admin_token),
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data["description"] == "改过的备注"
+            assert data["five_layers"]["基础信息"]["姓名"] == "李四"
+
+            # 持久化确认（重新 GET）
+            detail = client.get(url, headers=self._headers(admin_token)).json()
+            assert detail["description"] == "改过的备注"
+            assert detail["five_layers"]["基础信息"]["姓名"] == "李四"
+        finally:
+            self._drop(client, admin_token, snapshot_id)
+
+    def test_update_rejects_unknown_fields(self, admin_token: str, client: TestClient):
+        """extra=forbid：传 embedding 之类不在白名单的字段 -> 422（而不是静默忽略）。"""
+        snapshot_id = self._clone_id()
+        try:
+            resp = client.put(
+                f"/api/v1/admin/matching/snapshots/{snapshot_id}",
+                json={"embedding": [0.1] * 4},
+                headers=self._headers(admin_token),
+            )
+            assert resp.status_code == 422, resp.text
+        finally:
+            self._drop(client, admin_token, snapshot_id)
+
+    def test_update_not_found(self, admin_token: str, client: TestClient):
+        resp = client.put(
+            "/api/v1/admin/matching/snapshots/999999",
+            json={"description": "x"},
+            headers=self._headers(admin_token),
+        )
+        assert resp.status_code == 404
+
+    def test_delete_then_gone(self, admin_token: str, client: TestClient):
+        snapshot_id = self._clone_id()
+        url = f"/api/v1/admin/matching/snapshots/{snapshot_id}"
+
+        resp = client.delete(url, headers=self._headers(admin_token))
+        assert resp.status_code == 204
+
+        assert client.get(url, headers=self._headers(admin_token)).status_code == 404
+
+    def test_delete_not_found(self, admin_token: str, client: TestClient):
+        resp = client.delete(
+            "/api/v1/admin/matching/snapshots/999999",
+            headers=self._headers(admin_token),
+        )
+        assert resp.status_code == 404
+
+    def test_clone_has_username_and_report_count(self, admin_token: str, client: TestClient):
+        """列表项必须带 username 与 report_count（P1-4 新字段）。"""
+        resp = client.get(
+            "/api/v1/admin/matching/snapshots?limit=5",
+            headers=self._headers(admin_token),
+        )
+        assert resp.status_code == 200
+        for item in resp.json()["items"]:
+            assert item["username"] is None or isinstance(item["username"], str)
+            assert isinstance(item["report_count"], int)
+            assert item["report_count"] >= 0
