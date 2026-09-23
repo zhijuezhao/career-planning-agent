@@ -6,11 +6,17 @@ from langchain_core.tools import tool
 from loguru import logger
 
 
-def _normalise(text: str | None) -> str:
-    """Normalise a string for comparison."""
-    if not text:
+def _normalise(text: object) -> str:
+    """Normalise a value for comparison.
+
+    空值一律当空串：`float('nan')`（Excel 空单元格经 pandas 读入后的形态）是
+    **truthy**，`if not text` 拦不住它，随后 `text.strip()` 会抛
+    `'float' object has no attribute 'strip'`，直接炸掉整单导入（实测）。
+    """
+    if text is None:
         return ""
-    return text.strip().lower()
+    value = str(text).strip().lower()
+    return "" if value in ("nan", "none") else value
 
 
 def _similar(a: str, b: str) -> float:

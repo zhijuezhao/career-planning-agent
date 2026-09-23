@@ -55,12 +55,24 @@ def _build_column_mapping(columns: list[str], mapping: dict[str, str]) -> dict[s
     return result
 
 
+def _normalise_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """去首尾空白，并把空单元格统一成 None。
+
+    Excel 的空单元格会被 pandas 读成 NaN（float）。原样往下传会踩两个坑：
+    1. 去重阶段 `_normalise()` 里 `if not text` 拦不住 NaN（`bool(nan)` 是 True），
+       随后 `text.strip()` 抛 `'float' object has no attribute 'strip'` ——
+       实测让整单导入在 33% 处失败；
+    2. `json.dumps(row)` 会把 NaN 写成 `NaN`，严格 JSON 不允许，送进 LLM 提示词是隐患。
+    """
+    df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
+    return df.astype(object).where(df.notna(), None)
+
+
 def _load_excel_sync(file_path: str, sheet_name: str | int, nrows: int | None) -> list[dict]:
     """Synchronous Excel loading via pandas."""
     engine = _detect_engine(file_path)
     df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine, nrows=nrows, dtype=str)
-    df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
-    return df.to_dict(orient="records")
+    return _normalise_frame(df).to_dict(orient="records")
 
 
 def _load_csv_sync(file_path: str, nrows: int | None) -> list[dict]:
@@ -80,8 +92,7 @@ def _load_csv_sync(file_path: str, nrows: int | None) -> list[dict]:
                 keep_default_na=False,
                 encoding=encoding,
             )
-            df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
-            return df.to_dict(orient="records")
+            return _normalise_frame(df).to_dict(orient="records")
         except UnicodeDecodeError as exc:
             last_error = exc
     assert last_error is not None

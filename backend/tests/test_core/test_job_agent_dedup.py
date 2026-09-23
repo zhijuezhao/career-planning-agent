@@ -82,3 +82,24 @@ class TestDeduplicateJobs:
     async def test_is_tool_instance(self):
         assert isinstance(deduplicate_jobs, BaseTool)
         assert deduplicate_jobs.name == "deduplicate_jobs"
+
+    @pytest.mark.asyncio
+    async def test_nan_values_do_not_crash(self):
+        """回归：Excel 空单元格是 NaN(float)，NaN 是 truthy → 旧实现 `.strip()` 直接抛异常。"""
+        rows = [
+            {"title": float("nan"), "company": "A公司", "city": "北京"},
+            {"title": "后端工程师", "company": float("nan"), "city": "北京"},
+        ]
+        result = await deduplicate_jobs.ainvoke({"rows": rows})
+        assert result["total"] == 2
+
+    @pytest.mark.asyncio
+    async def test_none_and_nan_both_treated_as_empty(self):
+        rows = [
+            {"title": "前端工程师", "company": None, "city": "北京"},
+            {"title": "前端工程师", "company": float("nan"), "city": "北京"},
+        ]
+        result = await deduplicate_jobs.ainvoke({"rows": rows})
+        # 公司为空视为不冲突 → 标题相同 + 城市相同 → 判为重复
+        assert result["total"] == 1
+        assert result["fuzzy_dedup_count"] == 1

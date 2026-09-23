@@ -80,6 +80,30 @@ class TestLoadExcelData:
         assert isinstance(load_excel_data, BaseTool)
         assert load_excel_data.name == "load_excel_data"
 
+    @pytest.mark.asyncio
+    async def test_excel_blank_cells_become_none_not_nan(self, tmp_path):
+        """回归：空单元格曾是 NaN(float)。
+
+        pandas 把 Excel 空单元格读成 `NaN`，NaN 是 **truthy** → 去重阶段的
+        `text.strip()` 抛 `'float' object has no attribute 'strip'`，
+        实测让真实 50 行 xlsx 在 33% 处整单失败。这里断言空值一律是 `None`。
+        """
+        import pandas as pd
+
+        path = tmp_path / "blanks.xlsx"
+        pd.DataFrame(
+            {"岗位名称": ["前端工程师", None], "公司名称": [None, "B公司"]}
+        ).to_excel(path, index=False)
+
+        result = await load_excel_data.ainvoke({"file_path": str(path)})
+
+        assert result["total"] == 2
+        for row in result["rows"]:
+            for key, value in row.items():
+                assert not isinstance(value, float), f"{key} 仍是 float：{value!r}"
+        assert result["rows"][0]["company"] is None
+        assert result["rows"][1]["title"] is None
+
 
 class TestLoadCsvData:
     """S7-2（D-S7-2=A）：上传入口允许 .csv，data_loader 必须有 CSV 分支。"""
