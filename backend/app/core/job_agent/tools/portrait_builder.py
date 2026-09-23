@@ -56,7 +56,8 @@ async def portrait_builder(job_data: str) -> dict:
     try:
         gateway = get_llm_gateway()
         messages = build_portrait_messages(job_data)
-        response = await gateway.ainvoke(messages)
+        # function_key：由管理端「系统配置 > 功能路由」绑定模型；未配置则回落默认模型
+        response = await gateway.ainvoke(messages, function_key="job_portrait")
         raw_content = response.content if isinstance(response.content, str) else str(response.content)
 
         cleaned = _strip_json_fences(raw_content)

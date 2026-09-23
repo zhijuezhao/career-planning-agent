@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -385,3 +386,119 @@ class ImportProgressResponse(BaseModel):
     success_count: int
     error_count: int
     progress_pct: float
+
+
+# ── LLM 配置中心 Schemas（B2-1：供应商 / 模型 / 功能路由 / 连通性）─────────────
+
+class LLMProviderResponse(BaseModel):
+    """供应商回显：**永不回明文 api_key**，只有掩码与是否已配置。"""
+    id: int
+    name: str
+    base_url: str | None
+    enabled: bool
+    sort_order: int
+    api_key_set: bool
+    api_key_masked: str
+    model_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class LLMProviderCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    base_url: str | None = Field(None, max_length=500)
+    api_key: str | None = Field(None, max_length=500)
+    enabled: bool = True
+    sort_order: int = 0
+
+
+class LLMProviderUpdate(BaseModel):
+    """`api_key` 不传=不改；传空串=清除密钥（该供应商随之退出网关）。"""
+    name: str | None = Field(None, min_length=1, max_length=100)
+    base_url: str | None = Field(None, max_length=500)
+    api_key: str | None = Field(None, max_length=500)
+    enabled: bool | None = None
+    sort_order: int | None = None
+
+
+class LLMProviderListResponse(BaseModel):
+    total: int
+    items: list[LLMProviderResponse]
+
+
+class LLMModelResponse(BaseModel):
+    id: int
+    provider_id: int
+    provider_name: str | None = None
+    model_name: str
+    display_name: str | None
+    kind: str
+    dim: int | None
+    temperature: float | None
+    max_tokens: int | None
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class LLMModelCreate(BaseModel):
+    provider_id: int
+    model_name: str = Field(..., min_length=1, max_length=100)
+    display_name: str | None = Field(None, max_length=100)
+    kind: Literal["chat", "embedding"] = "chat"
+    dim: int | None = Field(None, ge=1, le=65536)
+    temperature: float | None = Field(None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(None, ge=1, le=100000)
+    enabled: bool = True
+
+
+class LLMModelUpdate(BaseModel):
+    model_name: str | None = Field(None, min_length=1, max_length=100)
+    display_name: str | None = Field(None, max_length=100)
+    kind: Literal["chat", "embedding"] | None = None
+    dim: int | None = Field(None, ge=1, le=65536)
+    temperature: float | None = Field(None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(None, ge=1, le=100000)
+    enabled: bool | None = None
+
+
+class LLMModelListResponse(BaseModel):
+    total: int
+    items: list[LLMModelResponse]
+
+
+class FunctionRouteResponse(BaseModel):
+    """一个功能键的生效情况。`source=db` 才表示管理端配置真的生效（含各项前置校验）。"""
+    function_key: str
+    label: str
+    kind: str
+    bound_model_id: int | None = None
+    bound_model: str | None = None
+    source: str = "env"          # db | env
+    effective: str = ""          # 实际生效的模型（或 env 回退说明）
+    fallback: str = ""           # 未配置时的回退
+    warning: str | None = None   # 绑定了但未生效的原因（模型/供应商禁用、kind 不符、无密钥…）
+    updated_at: datetime | None = None
+
+
+class FunctionRouteListResponse(BaseModel):
+    total: int
+    items: list[FunctionRouteResponse]
+
+
+class FunctionRouteUpdate(BaseModel):
+    """`model_id: null` = 解绑（回到 env/default 行为）。字段必填，避免"没传却以为改了"。"""
+    model_id: int | None
+
+    model_config = {"extra": "forbid"}
+
+
+class LLMConnectivityTestResponse(BaseModel):
+    ok: bool
+    model: str
+    kind: str
+    latency_ms: int
+    dim: int | None = None
+    dim_expected: int | None = None
+    output_preview: str | None = None
+    detail: str = ""

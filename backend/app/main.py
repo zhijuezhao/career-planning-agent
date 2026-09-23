@@ -60,6 +60,22 @@ def create_app() -> FastAPI:
         scheduler.shutdown()
         logger.info("Scheduler shutdown on application shutdown")
 
+    @app.on_event("startup")
+    async def warm_llm_registry():
+        """预热模型配置快照（B2-1）。
+
+        DB 里没有配置时快照为空 → 网关继续用 env（行为不变）；
+        预热失败只告警不阻塞启动，避免数据库暂时不可用导致整个服务起不来。
+        """
+        from app.core.llm.registry import reload_registry
+        from app.infrastructure.database import async_session_factory
+
+        try:
+            async with async_session_factory() as session:
+                await reload_registry(session)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("模型配置快照预热失败，沿用 env 配置 | error={}", exc)
+
     # Expose scheduler on app.state for access from routes
     app.state.scheduler = scheduler
 
