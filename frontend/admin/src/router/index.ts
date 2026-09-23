@@ -47,6 +47,12 @@ const router = createRouter({
           meta: { title: '匹配管理', icon: 'Connection' },
         },
         {
+          path: 'snapshots',
+          name: 'Snapshots',
+          component: () => import('@/views/Snapshots.vue'),
+          meta: { title: '快照管理', icon: 'Files' },
+        },
+        {
           path: 'users',
           name: 'Users',
           component: () => import('@/views/Users.vue'),
