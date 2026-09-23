@@ -97,3 +97,44 @@ class TestDashboardAPI:
         # S4: 改为读 app.state.scheduler（旧实现现场 new 且无公开 running 属性 -> 恒 unknown）
         assert data["scheduler"] in {"running", "stopped", "not_initialized"}
         assert "llm_gateway" in data
+
+
+class TestImportOverviewP16:
+    """P1-6：仪表盘「导入任务状态」卡片的数据源。"""
+
+    def test_fields_and_internal_consistency(self, admin_token: str, client: TestClient):
+        resp = client.get(
+            "/api/v1/admin/dashboard/import-overview",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert set(data) == {
+            "total_jobs",
+            "pending",
+            "processing",
+            "completed",
+            "failed",
+            "total_rows",
+            "success_rows",
+            "error_rows",
+            "last_import_at",
+        }
+        # 分组之和必须等于总数
+        assert data["total_jobs"] == (
+            data["pending"] + data["processing"] + data["completed"] + data["failed"]
+        )
+        for key in ("total_rows", "success_rows", "error_rows"):
+            assert data[key] >= 0
+
+    def test_total_jobs_matches_import_list(self, admin_token: str, client: TestClient):
+        """与导入列表的 total 交叉校验（防止统计口径漂移）。"""
+        overview = client.get(
+            "/api/v1/admin/dashboard/import-overview",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        ).json()
+        listing = client.get(
+            "/api/v1/admin/import?limit=1",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        ).json()
+        assert overview["total_jobs"] == listing["total"]

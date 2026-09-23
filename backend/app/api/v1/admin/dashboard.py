@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
+from app.domain.models.import_job import DataImportJob
 from app.domain.models.job import JobProfile, JobRawData
 from app.domain.models.profile_snapshot import ProfileSnapshot
 from app.domain.models.report import ChatSession
@@ -13,6 +14,7 @@ from app.domain.models.user import User
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
     DashboardOverview,
+    ImportOverview,
     JobCategoryStat,
     QualityDistribution,
     SnapshotStats,
@@ -163,6 +165,43 @@ async def snapshot_stats(
         total_snapshots=total,
         matched_snapshots=matched,
         pending_snapshots=total - matched,
+    )
+
+
+@router.get("/import-overview", response_model=ImportOverview)
+async def import_overview(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """导入任务总览（P1-6）：按状态分组计数 + 行数求和 + 最近一次导入时间。"""
+    status_rows = (
+        await db.execute(
+            select(DataImportJob.status, func.count()).group_by(DataImportJob.status)
+        )
+    ).all()
+    counts = {status: count for status, count in status_rows}
+
+    total_rows, success_rows, error_rows, last_at = (
+        await db.execute(
+            select(
+                func.coalesce(func.sum(DataImportJob.total_rows), 0),
+                func.coalesce(func.sum(DataImportJob.success_count), 0),
+                func.coalesce(func.sum(DataImportJob.error_count), 0),
+                func.max(DataImportJob.created_at),
+            )
+        )
+    ).one()
+
+    return ImportOverview(
+        total_jobs=sum(counts.values()),
+        pending=counts.get("pending", 0),
+        processing=counts.get("processing", 0),
+        completed=counts.get("completed", 0),
+        failed=counts.get("failed", 0),
+        total_rows=int(total_rows),
+        success_rows=int(success_rows),
+        error_rows=int(error_rows),
+        last_import_at=last_at,
     )
 
 

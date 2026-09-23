@@ -337,6 +337,23 @@ class SystemHealth(BaseModel):
     llm_gateway: str
 
 
+class ImportOverview(BaseModel):
+    """导入任务总览（P1-6 仪表盘用）。
+
+    注意语义：`total_rows/success_rows/error_rows` 是**所有任务求和**，不是单次导入。
+    其中 `success_rows` 在 S7-4（真实落库）落地后会等于「实际入库条数」。
+    """
+    total_jobs: int
+    pending: int
+    processing: int
+    completed: int
+    failed: int
+    total_rows: int
+    success_rows: int
+    error_rows: int
+    last_import_at: datetime | None = None
+
+
 # ── Import Job Admin Schemas ────────────────────────────────────────────────
 
 class ImportJobResponse(BaseModel):
