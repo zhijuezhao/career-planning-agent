@@ -1,9 +1,11 @@
-"""B2-2 单元/集成测试：公司 upsert、岗位落库、导入批量落库（真实 dev DB）。
+"""B2-2 / B2-5 单元/集成测试：公司 upsert、岗位↔公司关联、导入批量落库（真实 dev DB）。
 
 范围：
     * `normalise_company_name` 纯函数规则；
     * `upsert_company` 幂等 + 只在空字段时补全；
     * `upsert_job_profile` 挂 company_id、维护 job_count、空值不覆盖已有画像；
+    * **B2-5**：同一岗位名多家公司 → 关联表两条、主公司不漂移、双方 job_count 正确；
+      关联幂等（hit_count 累加）、`backfill_links_from_profiles` 幂等;
     * `persist_import_rows` 的统计与**行级容错**（一行没 title 不该拖垮其他行）。
 
 所有用例只创建 `b22_<ts>_*` 前缀的数据，结束时按前缀 + 自增 id 精确清理。
@@ -16,7 +18,10 @@ import time
 import pytest
 from app.domain.models.company import Company
 from app.domain.models.job import JobProfile, JobRawData
+from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.services.company_service import (
+    backfill_links_from_profiles,
+    company_job_count,
     normalise_company_name,
     refresh_job_count,
     upsert_company,
@@ -228,3 +233,97 @@ class TestPersistImportRows:
             ).scalar_one()
             assert row.company == _company("原始公司")
             assert row.source == "import"
+
+
+class TestJobCompanyLinks:
+    """B2-5：岗位 ↔ 公司 多对多（同一岗位可被多家公司招）。"""
+
+    async def test_same_title_two_companies_keeps_both_links(self):
+        title = _title("同岗多公司")
+        async with test_session_factory() as session:
+            profile_a, created_a = await upsert_job_profile(
+                session, {"title": title, "company": _company("甲公司X")}
+            )
+            primary_company_id = profile_a.company_id
+            profile_b, created_b = await upsert_job_profile(
+                session, {"title": title, "company": _company("乙公司X")}
+            )
+            await session.commit()
+
+            # 画像仍按 title 去重
+            assert created_a is True and created_b is False
+            assert profile_b.id == profile_a.id
+            # 主公司首次为准，不被后来者覆盖
+            assert profile_b.company_id == primary_company_id
+
+            links = list(
+                (
+                    await session.execute(
+                        select(JobCompanyLink).where(JobCompanyLink.job_profile_id == profile_a.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(links) == 2
+
+            # 两家公司各自「有多少岗位」都是 1
+            for name in ("甲公司X", "乙公司X"):
+                company = (
+                    await session.execute(select(Company).where(Company.name == _company(name)))
+                ).scalar_one()
+                assert company.job_count == 1
+                assert await company_job_count(session, company.id) == 1
+
+    async def test_link_is_idempotent_and_counts_hits(self):
+        title = _title("重复导入")
+        async with test_session_factory() as session:
+            profile, _ = await upsert_job_profile(
+                session, {"title": title, "company": _company("重复公司")}
+            )
+            await upsert_job_profile(session, {"title": title, "company": _company("重复公司")})
+            await upsert_job_profile(session, {"title": title, "company": _company("重复公司")})
+            await session.commit()
+
+            links = list(
+                (
+                    await session.execute(
+                        select(JobCompanyLink).where(JobCompanyLink.job_profile_id == profile.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(links) == 1
+            assert links[0].hit_count == 3
+
+    async def test_backfill_links_from_profiles_is_idempotent(self):
+        """老数据只有 company_id 没有关联行 → sync 回填一次；重复调用不再新建。"""
+        title = _title("老数据岗位")
+        async with test_session_factory() as session:
+            profile, _ = await upsert_job_profile(
+                session, {"title": title, "company": _company("老数据公司")}
+            )
+            # 模拟 B2-5 之前的数据：删掉关联，只留 company_id
+            await session.execute(
+                text("DELETE FROM job_company_links WHERE job_profile_id = :i"),
+                {"i": profile.id},
+            )
+            await session.commit()
+
+            first = await backfill_links_from_profiles(session)
+            await session.commit()
+            assert first >= 1
+
+            second = await backfill_links_from_profiles(session)
+            await session.commit()
+            assert second == 0
+
+            count = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(JobCompanyLink)
+                    .where(JobCompanyLink.job_profile_id == profile.id)
+                )
+            ).scalar_one()
+            assert count == 1

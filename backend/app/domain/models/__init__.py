@@ -3,6 +3,7 @@ from app.domain.models.dimension_score import DimensionScore
 from app.domain.models.dimension_weight import DimensionWeight
 from app.domain.models.import_job import DataImportJob
 from app.domain.models.job import JobProfile, JobRawData
+from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.models.llm_config import LLMModel, LLMProvider, LLMRoute
 from app.domain.models.match_record import JobMatchRecord
 from app.domain.models.profile_snapshot import ProfileSnapshot
@@ -26,4 +27,5 @@ __all__ = [
     "LLMProvider", "LLMModel", "LLMRoute",
     "Company",
     "JobMatchRecord",
+    "JobCompanyLink",
 ]

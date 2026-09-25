@@ -1,10 +1,14 @@
-"""岗位落库服务（B2-2）：`db_writer` 工具与导入流水线共用的 upsert 逻辑。
+"""岗位落库服务（B2-2 / B2-5）：`db_writer` 工具与导入流水线共用的 upsert 逻辑。
 
 拆分原因：原 `db_writer._write_profile` 把「开 session + 业务 upsert」揉在一起，
 导入流水线要落库时只能复制一份；现在业务逻辑集中在这里，两处调用同一实现。
 
 合并原则与 §4.3 一致：调用方负责把「表格清洗值」放在最后合并（表格值优先），
 本层只负责**空值不覆盖已有值**（`_pick`）。
+
+B2-5：upsert 岗位画像时同时写 `job_company_links`（岗位 ↔ 公司 多对多）。
+`job_profiles.company_id` 只记「主公司」，且**首次为准不再漂移** ——
+否则「同一岗位名、不同公司」的第二条会把第一条的公司覆盖掉（旧实现的数据缺陷）。
 """
 
 from __future__ import annotations
@@ -14,7 +18,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models.job import JobProfile, JobRawData
-from app.domain.services.company_service import refresh_job_count, upsert_company
+from app.domain.services.company_service import (
+    link_job_company,
+    refresh_job_count,
+    upsert_company,
+)
 
 _EMPTY = (None, "", [], {})
 
@@ -44,9 +52,14 @@ async def write_raw_job(session: AsyncSession, data: dict) -> JobRawData:
 
 
 async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProfile, bool]:
-    """按 title 去重 upsert 岗位画像；顺带 upsert 公司并挂上 `company_id`。
+    """按 title 去重 upsert 岗位画像；顺带 upsert 公司、写「岗位↔公司」关联。
 
     返回 (profile, created)。title 为空抛 ValueError（调用方按行容错）。
+
+    公司归属（B2-5）：
+    - `job_company_links` 记录**全部**在招公司（同一岗位可被多家公司招）；
+    - `job_profiles.company_id` 只记「主公司」，**首次为准**，后续导入不再覆盖
+      （旧实现每行都覆盖，导致"同一岗位名、不同公司"时公司归属漂移且旧公司计数陈旧）。
     """
     title = str(data.get("title") or "").strip()
     if not title:
@@ -83,7 +96,8 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
         existing.requirement_intensity = _pick(data, "five_dimensions", existing.requirement_intensity)
         existing.outlook = _pick(data, "outlook", existing.outlook)
         existing.summary = _pick(data, "summary", existing.summary)
-        if company is not None:
+        if company is not None and existing.company_id is None:
+            # 主公司只在为空时落定，避免"同岗多公司"互相覆盖
             existing.company_id = company.id
         profile, created = existing, False
     else:
@@ -107,7 +121,15 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
         created = True
 
     await session.flush()
+
     if company is not None:
+        # 关联表是「岗位 ↔ 公司」的真相来源；计数按它重算
+        await link_job_company(
+            session,
+            job_profile_id=profile.id,
+            company_id=company.id,
+            source=str(data.get("source") or "import")[:20],
+        )
         await refresh_job_count(session, company.id)
     return profile, created
 

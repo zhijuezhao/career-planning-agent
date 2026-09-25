@@ -24,7 +24,8 @@
 
 覆盖范围：计划 §5.1 七张新表（llm_providers / llm_models / llm_routes / companies /
 job_match_records / link_xpath_templates / link_fetch_cache）+ §5.2 六处新列
-（job_profiles.company_id / source_url / enrich_stats、data_import_jobs.stats、users.qq / wechat）。
+（job_profiles.company_id / source_url / enrich_stats、data_import_jobs.stats、users.qq / wechat）
++ B2-5 的岗位↔公司关联表 `job_company_links`（同一岗位可被多家公司在招）。
 
 数据库地址优先级：--database-url > 环境变量 DATABASE_URL > backend/.env（get_settings()）> 内置默认值。
 Windows 控制台若中文乱码，先执行: chcp 65001
@@ -203,6 +204,25 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         )
         """,
     ),
+    TableSpec(
+        "job_company_links",
+        """
+        CREATE TABLE IF NOT EXISTS job_company_links (
+            id BIGSERIAL PRIMARY KEY,
+            job_profile_id BIGINT NOT NULL,
+            company_id BIGINT NOT NULL,
+            source VARCHAR(20) NOT NULL DEFAULT 'import',
+            hit_count INTEGER NOT NULL DEFAULT 1,
+            first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            CONSTRAINT uq_job_company_links UNIQUE (job_profile_id, company_id),
+            CONSTRAINT fk_job_company_links_profile FOREIGN KEY (job_profile_id)
+                REFERENCES job_profiles (id) ON DELETE CASCADE,
+            CONSTRAINT fk_job_company_links_company FOREIGN KEY (company_id)
+                REFERENCES companies (id) ON DELETE CASCADE
+        )
+        """,
+    ),
 )
 
 COLUMN_SPECS: tuple[ColumnSpec, ...] = (
@@ -278,6 +298,10 @@ INDEX_SPECS: tuple[IndexSpec, ...] = (
     IndexSpec(
         "ix_job_profiles_company_id",
         "CREATE INDEX IF NOT EXISTS ix_job_profiles_company_id ON job_profiles (company_id)",
+    ),
+    IndexSpec(
+        "ix_job_company_links_company_id",
+        "CREATE INDEX IF NOT EXISTS ix_job_company_links_company_id ON job_company_links (company_id)",
     ),
 )
 
@@ -433,7 +457,11 @@ async def apply_ddl(database_url: str, dry_run: bool) -> int:
                 f"[SUMMARY] created={len(result.created)} skipped={len(result.skipped)} (total={total})",
                 flush=True,
             )
-            print("[VERIFY] 7 表 + 6 列 + 1 外键 + 8 索引齐备", flush=True)
+            print(
+                f"[VERIFY] {len(TABLE_SPECS)} 表 + {len(COLUMN_SPECS)} 列 + "
+                f"{len(CONSTRAINT_SPECS)} 外键 + {len(INDEX_SPECS)} 索引齐备",
+                flush=True,
+            )
             return 0
     finally:
         await engine.dispose()

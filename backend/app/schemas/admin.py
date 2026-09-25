@@ -65,10 +65,28 @@ class JobProfileResponse(BaseModel):
     # B2-2：公司实体（company_name 由接口 join 填充，ORM 上不存在该列）
     company_id: int | None = None
     company_name: str | None = None
+    # B2-5：有多少家公司在招这个岗位（关联表统计）
+    company_count: int = 0
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class JobCompanyLinkInfo(BaseModel):
+    """岗位详情里的「在招公司」条目（B2-5）。"""
+    company_id: int
+    company_name: str
+    industry: str | None = None
+    city: str | None = None
+    hit_count: int = 1
+    last_seen_at: datetime | None = None
+    is_primary: bool = False
+
+
+class JobProfileDetail(JobProfileResponse):
+    """岗位详情：比列表多一份「在招公司」清单。"""
+    companies: list[JobCompanyLinkInfo] = []
 
 
 class JobProfileCreate(BaseModel):
@@ -556,6 +574,8 @@ class CompanyListResponse(BaseModel):
 class CompanySyncResponse(BaseModel):
     synced: int
     with_jobs: int
+    # B2-5：把历史上只有 job_profiles.company_id 的关联补进 job_company_links 的行数
+    links_created: int = 0
 
 
 # ── Match Record Admin Schemas（B2-3，需求 3：匹配明细）────────────────────────

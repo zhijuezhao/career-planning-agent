@@ -1,9 +1,11 @@
-"""公司实体管理（B2-2，需求 3）：公司信息导航。
+"""公司实体管理（B2-2 / B2-5，需求 3）：公司信息导航。
 
 - 数据来源：导入流水线 persist 阶段 / `db_writer` 工具 / 管理端手工建岗位时
   由 `company_service.upsert_company()` 幂等 upsert；
-- `job_count` 是冗余列，`POST /companies/sync` 可按 `job_profiles.company_id` 全量重算；
-- 删除公司**不会删岗位**：`job_profiles.company_id` 外键是 ON DELETE SET NULL。
+- 岗位↔公司是**多对多**（`job_company_links`，B2-5）：一个岗位可被多家公司招，
+  一家公司也可招多个岗位。`job_count` 是冗余列，由关联表重算；
+- `POST /companies/sync`：回填历史关联 + 全量重算 `job_count`；
+- 删除公司**不会删岗位**：关联行随公司级联删除，岗位本身保留。
 """
 
 from __future__ import annotations
@@ -15,8 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.admin.auth import require_admin
 from app.domain.models.company import Company
 from app.domain.models.job import JobProfile
+from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.models.user import User
-from app.domain.services.company_service import sync_all_job_counts
+from app.domain.services.company_service import backfill_links_from_profiles, sync_all_job_counts
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
     CompanyDetail,
@@ -91,7 +94,8 @@ async def get_company(
         (
             await db.execute(
                 select(JobProfile)
-                .where(JobProfile.company_id == company_id)
+                .join(JobCompanyLink, JobCompanyLink.job_profile_id == JobProfile.id)
+                .where(JobCompanyLink.company_id == company_id)
                 .order_by(JobProfile.id.desc())
                 .limit(DETAIL_JOB_LIMIT)
             )
@@ -150,7 +154,7 @@ async def delete_company(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """删除公司行（岗位不受影响：外键 ON DELETE SET NULL 只解绑）。"""
+    """删除公司行（岗位不受影响：关联行随公司级联删除，岗位本身保留）。"""
     company = await db.get(Company, company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found")
@@ -163,13 +167,18 @@ async def sync_companies(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """按 `job_profiles.company_id` 全量重算 `job_count`（修数口子）。"""
+    """修数口子：先把历史关联回填进 `job_company_links`，再按关联表全量重算 `job_count`。
+
+    回填是幂等的（已存在的组合跳过），重复点不会产生重复行；B2-5 之前导入的岗位
+    只记了 `job_profiles.company_id`，不补关联的话两个方向的查询都会漏掉它们。
+    """
+    links_created = await backfill_links_from_profiles(db)
     synced = await sync_all_job_counts(db)
     await db.flush()
     with_jobs = (
         await db.execute(select(func.count()).select_from(Company).where(Company.job_count > 0))
     ).scalar() or 0
-    return CompanySyncResponse(synced=synced, with_jobs=with_jobs)
+    return CompanySyncResponse(synced=synced, with_jobs=with_jobs, links_created=links_created)
 
 
 __all__ = ["router"]

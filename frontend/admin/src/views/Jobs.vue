@@ -1,9 +1,11 @@
 <script setup lang="ts">
 /**
- * 岗位管理（P1-3，需求 2）
+ * 岗位管理（P1-3 / B2-5，需求 2）
  *
- * 列：岗位名称 / 级别 / 行业 / 学历 / 薪资 / 经验 / **岗位画像（逐字段详情）** / 导入时间 / 最近更新
+ * 列：岗位名称 / **公司（主公司 + 在招公司数）** / 级别 / 行业 / 学历 / 薪资 / 经验 /
+ *     **岗位画像（逐字段详情）** / 导入时间 / 最近更新
  * 画像：每个字段一个「详情」按钮 → `DetailDialog`（Markdown 预览 + JSON 页签）
+ * 公司（B2-5）：岗位↔公司是多对多；「在招公司」弹窗列出全部在招该岗位的公司
  * 编辑：仅标量字段；JSONB 画像本轮只读预览（改画像需要结构化编辑器，留待后续）
  */
 import { computed, onMounted, reactive, ref } from 'vue'
@@ -32,8 +34,19 @@ interface JobItem {
   outlook: unknown
   company_id: number | null
   company_name: string | null
+  company_count: number
   created_at: string
   updated_at: string
+}
+
+interface JobCompanyLink {
+  company_id: number
+  company_name: string
+  industry: string | null
+  city: string | null
+  hit_count: number
+  last_seen_at: string | null
+  is_primary: boolean
 }
 
 interface CompanyOption {
@@ -90,6 +103,27 @@ const fetchCompanies = async () => {
     companies.value = res.items
   } catch {
     // error handled by interceptor
+  }
+}
+
+// ── 在招公司（B2-5）──────────────────────────────────────────────────────────
+
+const linkVisible = ref(false)
+const linkLoading = ref(false)
+const linkTitle = ref('')
+const linkRows = ref<JobCompanyLink[]>([])
+
+const openCompanies = async (row: JobItem) => {
+  linkTitle.value = `「${row.title}」在招公司`
+  linkVisible.value = true
+  linkLoading.value = true
+  try {
+    const detail = await get<{ companies: JobCompanyLink[] }>(`/v1/admin/jobs/${row.id}`)
+    linkRows.value = detail.companies || []
+  } catch {
+    // error handled by interceptor
+  } finally {
+    linkLoading.value = false
   }
 }
 
@@ -268,8 +302,21 @@ onMounted(async () => {
       <el-table v-loading="loading" :data="tableData" stripe>
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="title" label="岗位名称" min-width="160" show-overflow-tooltip />
-        <el-table-column label="公司" width="160" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.company_name || '-' }}</template>
+        <el-table-column label="公司" width="200" show-overflow-tooltip>
+          <template #default="{ row }">
+            <div class="company-cell">
+              <span>{{ row.company_name || '-' }}</span>
+              <el-button
+                v-if="row.company_count > 1"
+                type="primary"
+                size="small"
+                link
+                @click="openCompanies(row)"
+              >
+                等 {{ row.company_count }} 家
+              </el-button>
+            </div>
+          </template>
         </el-table-column>
         <el-table-column prop="level" label="级别" width="80" />
         <el-table-column prop="industry" label="所属行业" width="120" show-overflow-tooltip />
@@ -363,6 +410,33 @@ onMounted(async () => {
       :json="detailJson"
       width="800px"
     />
+
+    <el-dialog v-model="linkVisible" :title="linkTitle" width="720px">
+      <el-table v-loading="linkLoading" :data="linkRows" size="small" stripe>
+        <el-table-column label="公司" min-width="200" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.company_name }}
+            <el-tag v-if="row.is_primary" size="small" type="success" class="primary-tag">主公司</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="行业" width="120">
+          <template #default="{ row }">{{ row.industry || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="城市" width="100">
+          <template #default="{ row }">{{ row.city || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="出现次数" width="90">
+          <template #default="{ row }">{{ row.hit_count }}</template>
+        </el-table-column>
+        <el-table-column label="最近一次" width="170">
+          <template #default="{ row }">{{ formatDateTime(row.last_seen_at) }}</template>
+        </el-table-column>
+      </el-table>
+      <el-empty v-if="!linkLoading && linkRows.length === 0" description="暂无在招公司" :image-size="60" />
+      <template #footer>
+        <el-button type="primary" @click="linkVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -382,5 +456,15 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   gap: 2px 8px;
+}
+
+.company-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.primary-tag {
+  margin-left: 6px;
 }
 </style>

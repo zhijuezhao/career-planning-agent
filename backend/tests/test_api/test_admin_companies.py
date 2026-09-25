@@ -10,10 +10,11 @@ import asyncio
 import time
 
 import pytest
+from app.domain.models.company import Company
 from app.domain.services.job_persist_service import upsert_job_profile
 from app.main import app
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from tests.conftest import test_session_factory
 
 _ts = str(int(time.time()))
@@ -92,6 +93,103 @@ def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _seed_same_title() -> dict[str, int]:
+    """同一岗位名被两家公司招（B2-5 场景）：返回 job_id + 两家公司 id。
+
+    用独立子前缀（`<prefix>-L`），避免污染其它用例对 `_company("")` 前缀的精确断言。
+    """
+    title = f"{_PREFIX}-L_同岗两家公司"
+    name_a = f"{_PREFIX}-L_同岗甲"
+    name_b = f"{_PREFIX}-L_同岗乙"
+    async with test_session_factory() as session:
+        profile, _ = await upsert_job_profile(
+            session, {"title": title, "company": name_a, "industry": "互联网"}
+        )
+        await upsert_job_profile(session, {"title": title, "company": name_b})
+        await session.commit()
+
+        company_ids = {}
+        for name in (name_a, name_b):
+            company_ids[name] = (
+                await session.execute(select(Company.id).where(Company.name == name))
+            ).scalar_one()
+        return {
+            "job_id": int(profile.id),
+            "company_a": company_ids[name_a],
+            "company_b": company_ids[name_b],
+            "name_a": name_a,
+            "name_b": name_b,
+        }
+
+
+class TestJobCompanyLinksAPI:
+    """B2-5：岗位 ↔ 公司 多对多的两个查询方向（管理端接口）。"""
+
+    def test_jobs_filter_matches_linked_company_not_only_primary(self, client, admin_token):
+        seeded = asyncio.run(_seed_same_title())
+        job_id = seeded["job_id"]
+
+        for key in ("company_a", "company_b"):
+            resp = client.get(
+                "/api/v1/admin/jobs",
+                params={"company_id": seeded[key]},
+                headers=_headers(admin_token),
+            )
+            assert resp.status_code == 200, resp.text
+            ids = [i["id"] for i in resp.json()["items"]]
+            assert job_id in ids, f"{key} 应能通过关联表查到该岗位"
+
+    def test_job_list_exposes_company_count(self, client, admin_token):
+        seeded = asyncio.run(_seed_same_title())
+        resp = client.get(
+            "/api/v1/admin/jobs",
+            params={"company_id": seeded["company_a"]},
+            headers=_headers(admin_token),
+        )
+        item = next(i for i in resp.json()["items"] if i["id"] == seeded["job_id"])
+        assert item["company_count"] == 2
+
+    def test_job_detail_lists_all_hiring_companies(self, client, admin_token):
+        seeded = asyncio.run(_seed_same_title())
+        resp = client.get(
+            f"/api/v1/admin/jobs/{seeded['job_id']}", headers=_headers(admin_token)
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["company_count"] == 2
+        names = {c["company_name"] for c in data["companies"]}
+        assert names == {seeded["name_a"], seeded["name_b"]}
+        primaries = [c for c in data["companies"] if c["is_primary"]]
+        assert len(primaries) == 1
+        assert primaries[0]["company_id"] == data["company_id"]  # 主公司 = 首次那家
+
+    def test_company_detail_shows_linked_jobs(self, client, admin_token):
+        seeded = asyncio.run(_seed_same_title())
+        resp = client.get(
+            f"/api/v1/admin/companies/{seeded['company_b']}", headers=_headers(admin_token)
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["job_count"] == 1
+        assert [j["id"] for j in data["jobs"]] == [seeded["job_id"]]
+
+    def test_sync_backfills_links_and_reports_count(self, client, admin_token):
+        resp = client.post("/api/v1/admin/companies/sync", headers=_headers(admin_token))
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert isinstance(data["links_created"], int)
+        assert data["synced"] >= 1
+
+    def test_company_job_counts_reflect_links_after_sync(self, client, admin_token):
+        seeded = asyncio.run(_seed_same_title())
+        client.post("/api/v1/admin/companies/sync", headers=_headers(admin_token))
+        for key in ("company_a", "company_b"):
+            detail = client.get(
+                f"/api/v1/admin/companies/{seeded[key]}", headers=_headers(admin_token)
+            ).json()
+            assert detail["job_count"] == 1
+
+
 class TestCompanyAuth:
     def test_list_forbidden_for_student(self, client: TestClient, student_token: str):
         resp = client.get("/api/v1/admin/companies", headers=_headers(student_token))
@@ -103,7 +201,7 @@ class TestCompanyList:
         resp = client.get("/api/v1/admin/companies", headers=_headers(admin_token))
         assert resp.status_code == 200, resp.text
         items = resp.json()["items"]
-        mine = [i for i in items if i["name"].startswith(_PREFIX)]
+        mine = [i for i in items if i["name"].startswith(_company(""))]
         assert [i["name"] for i in mine] == [_company("甲"), _company("乙")]  # 2 个岗位在前
         assert [i["job_count"] for i in mine] == [2, 1]
 

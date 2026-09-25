@@ -503,6 +503,24 @@ class TestImportS71StateMachine:
                     )
 
             assert asyncio.run(_raw_count()) == 3
+
+            # B2-5：每个 (岗位, 公司) 组合都写了关联行 —— 3 行 → 3 条关联
+            async def _link_count() -> int:
+                async with _probe_session_factory() as session:
+                    return int(
+                        (
+                            await session.execute(
+                                text(
+                                    "SELECT count(*) FROM job_company_links l "
+                                    "JOIN job_profiles p ON p.id = l.job_profile_id "
+                                    "WHERE p.title LIKE :p"
+                                ),
+                                {"p": f"%{suffix}"},
+                            )
+                        ).scalar_one()
+                    )
+
+            assert asyncio.run(_link_count()) == 3
         finally:
             async def _cleanup_suffix() -> None:
                 async with _probe_session_factory() as session:
