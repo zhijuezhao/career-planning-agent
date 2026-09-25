@@ -172,8 +172,6 @@ class TestNodeQualityJudge:
 class TestCompiledPipeline:
     @pytest.mark.asyncio
     async def test_full_pipeline_invoke(self):
-        compiled = compile_import_pipeline()
-
         row = {"title": "前端工程师", "city": "北京", "company": "A"}
         judge_result = {
             "grade": "A", "score": 90, "breakdown": {},
@@ -190,6 +188,11 @@ class TestCompiledPipeline:
             "transition_roles": [], "outlook": {}, "summary": "",
         }
 
+        async def _noop_persist(state: dict) -> dict:
+            # B2-2：persist 阶段会真落库。本用例只验证「七节点图能跑通 + 计数」，
+            # 故把落库换空替身（真落库由 test_admin_import 的用例覆盖）。
+            return {"persist_stats": {}, "status": "completed"}
+
         with (
             patch("app.core.job_agent.tools.data_loader.load_excel_data",
                   _mock_tool({"rows": [row], "total": 1})),
@@ -205,7 +208,11 @@ class TestCompiledPipeline:
                   _mock_tool(extract_result)),
             patch("app.core.job_agent.tools.portrait_builder.portrait_builder",
                   _mock_tool(portrait_result)),
+            patch("app.core.job_agent.graphs.import_pipeline.node_persist", _noop_persist),
         ):
+            # 注意：必须在 patch 生效之后再编译 —— 图在 add_node 时就捕获了函数对象，
+            # 先编译再 patch 会拿到真 persist（会写库，且池化连接跨事件循环 → S1 的坑）。
+            compiled = compile_import_pipeline()
             result = await compiled.ainvoke({
                 "file_path": "test.xlsx",
                 "sheet_name": 0,

@@ -1,0 +1,8 @@
+# 构建上下文里必须排除宿主机的依赖与产物：
+# 容器内 `npm install` 装的是 Linux(musl) 依赖，若再被宿主机的 node_modules 覆盖，
+# vite/rolldown 的原生绑定会错位（实测：`COPY . .` 覆盖后 `vite build` 报
+# `sourcemapPathTransform → path.resolve` TypeError，构建直接失败）。
+node_modules
+dist
+.vite
+*.log

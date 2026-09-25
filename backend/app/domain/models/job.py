@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +25,10 @@ class JobProfile(Base):
     outlook: Mapped[dict | None] = mapped_column(JSONB)
     summary: Mapped[str | None] = mapped_column(Text)
     source_data_ids: Mapped[dict | None] = mapped_column(JSONB)
+    # B2-2：公司实体外键（DDL 见 apply_ddl.py；NULL = 未识别出公司）
+    company_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("companies.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

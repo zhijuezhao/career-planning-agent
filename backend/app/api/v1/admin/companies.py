@@ -1,0 +1,175 @@
+"""公司实体管理（B2-2，需求 3）：公司信息导航。
+
+- 数据来源：导入流水线 persist 阶段 / `db_writer` 工具 / 管理端手工建岗位时
+  由 `company_service.upsert_company()` 幂等 upsert；
+- `job_count` 是冗余列，`POST /companies/sync` 可按 `job_profiles.company_id` 全量重算；
+- 删除公司**不会删岗位**：`job_profiles.company_id` 外键是 ON DELETE SET NULL。
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.v1.admin.auth import require_admin
+from app.domain.models.company import Company
+from app.domain.models.job import JobProfile
+from app.domain.models.user import User
+from app.domain.services.company_service import sync_all_job_counts
+from app.infrastructure.database import get_db
+from app.schemas.admin import (
+    CompanyDetail,
+    CompanyJobSummary,
+    CompanyListResponse,
+    CompanyResponse,
+    CompanySyncResponse,
+    CompanyUpdate,
+)
+
+router = APIRouter()
+
+DETAIL_JOB_LIMIT = 50
+
+
+@router.get("", response_model=CompanyListResponse)
+async def list_companies(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    q: str | None = Query(None, description="按公司名模糊搜索"),
+    industry: str | None = None,
+    city: str | None = None,
+    only_with_jobs: bool = Query(False, description="只看有岗位的公司"),
+    sort: str = Query("job_count", pattern="^(job_count|name|created_at)$"),
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """公司列表（默认按岗位数倒序，便于「公司导航」先看到主要雇主）。"""
+    conditions = []
+    if q:
+        conditions.append(Company.name.ilike(f"%{q}%"))
+    if industry:
+        conditions.append(Company.industry == industry)
+    if city:
+        conditions.append(Company.city == city)
+    if only_with_jobs:
+        conditions.append(Company.job_count > 0)
+
+    query = select(Company)
+    count_query = select(func.count()).select_from(Company)
+    for condition in conditions:
+        query = query.where(condition)
+        count_query = count_query.where(condition)
+
+    total = (await db.execute(count_query)).scalar() or 0
+
+    order = {
+        "job_count": (Company.job_count.desc(), Company.name.asc()),
+        "name": (Company.name.asc(),),
+        "created_at": (Company.created_at.desc(),),
+    }[sort]
+    query = query.order_by(*order).offset(skip).limit(limit)
+    items = list((await db.execute(query)).scalars().all())
+
+    return CompanyListResponse(
+        total=total, items=[CompanyResponse.model_validate(c) for c in items]
+    )
+
+
+@router.get("/{company_id}", response_model=CompanyDetail)
+async def get_company(
+    company_id: int,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """公司详情 + 该公司最近岗位（最多 50 条，够导航用；更多请用岗位页按公司筛选）。"""
+    company = await db.get(Company, company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    jobs = list(
+        (
+            await db.execute(
+                select(JobProfile)
+                .where(JobProfile.company_id == company_id)
+                .order_by(JobProfile.id.desc())
+                .limit(DETAIL_JOB_LIMIT)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    detail = CompanyDetail.model_validate(company)
+    detail.jobs = [
+        CompanyJobSummary(
+            id=j.id,
+            title=j.title,
+            industry=j.industry,
+            level=j.level,
+            salary_range=j.salary_range,
+            created_at=j.created_at,
+        )
+        for j in jobs
+    ]
+    return detail
+
+
+@router.put("/{company_id}", response_model=CompanyResponse)
+async def update_company(
+    company_id: int,
+    data: CompanyUpdate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """人工修正公司名/行业/城市（导入自动识别的值可能不准）。"""
+    company = await db.get(Company, company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    fields = data.model_dump(exclude_unset=True)
+    new_name = fields.get("name")
+    if new_name and new_name != company.name:
+        dup = (
+            await db.execute(select(Company).where(Company.name == new_name))
+        ).scalar_one_or_none()
+        if dup is not None:
+            raise HTTPException(status_code=409, detail="Another company already uses this name")
+
+    for field, value in fields.items():
+        setattr(company, field, value)
+
+    await db.flush()
+    await db.refresh(company)
+    return CompanyResponse.model_validate(company)
+
+
+@router.delete("/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_company(
+    company_id: int,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除公司行（岗位不受影响：外键 ON DELETE SET NULL 只解绑）。"""
+    company = await db.get(Company, company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+    await db.delete(company)
+    await db.flush()
+
+
+@router.post("/sync", response_model=CompanySyncResponse)
+async def sync_companies(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """按 `job_profiles.company_id` 全量重算 `job_count`（修数口子）。"""
+    synced = await sync_all_job_counts(db)
+    await db.flush()
+    with_jobs = (
+        await db.execute(select(func.count()).select_from(Company).where(Company.job_count > 0))
+    ).scalar() or 0
+    return CompanySyncResponse(synced=synced, with_jobs=with_jobs)
+
+
+__all__ = ["router"]

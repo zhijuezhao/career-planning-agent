@@ -29,6 +29,12 @@ const router = createRouter({
           meta: { title: '岗位管理', icon: 'Briefcase' },
         },
         {
+          path: 'companies',
+          name: 'Companies',
+          component: () => import('@/views/Companies.vue'),
+          meta: { title: '公司导航', icon: 'OfficeBuilding' },
+        },
+        {
           path: 'raw-data',
           name: 'RawData',
           component: () => import('@/views/RawData.vue'),

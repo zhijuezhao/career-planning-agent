@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1.admin import auth as admin_auth
 from app.api.v1.admin.chat import router as chat_router
+from app.api.v1.admin.companies import router as companies_router
 from app.api.v1.admin.dashboard import router as dashboard_router
 from app.api.v1.admin.import_module import router as import_router
 from app.api.v1.admin.jobs import router as jobs_router
@@ -14,6 +15,7 @@ from app.api.v1.admin.users import router as users_router
 router = APIRouter()
 router.include_router(admin_auth.router, prefix="/auth", tags=["admin-auth"])
 router.include_router(chat_router, prefix="/chat", tags=["admin-chat"])
+router.include_router(companies_router, prefix="/companies", tags=["admin-companies"])
 router.include_router(dashboard_router, prefix="/dashboard", tags=["admin-dashboard"])
 router.include_router(import_router, prefix="/import", tags=["admin-import"])
 router.include_router(jobs_router, prefix="/jobs", tags=["admin-jobs"])

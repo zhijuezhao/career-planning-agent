@@ -7,6 +7,7 @@
  * 编辑：仅标量字段；JSONB 画像本轮只读预览（改画像需要结构化编辑器，留待后续）
  */
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { get, post, put, remove } from '@/api/request'
 import { DetailDialog } from '@/components'
@@ -29,9 +30,19 @@ interface JobItem {
   career_path: unknown
   transition_paths: unknown
   outlook: unknown
+  company_id: number | null
+  company_name: string | null
   created_at: string
   updated_at: string
 }
+
+interface CompanyOption {
+  id: number
+  name: string
+  job_count: number
+}
+
+const route = useRoute()
 
 const loading = ref(false)
 const tableData = ref<JobItem[]>([])
@@ -40,12 +51,17 @@ const dialogVisible = ref(false)
 const submitting = ref(false)
 const editingId = ref<number | null>(null)
 const formRef = ref<FormInstance>()
+const companies = ref<CompanyOption[]>([])
+
+// B2-2：支持从「公司导航」跳过来时带上 company_id（?company_id=123）
+const initialCompanyId = Number(route.query.company_id ?? 0) || undefined
 
 const query = reactive({
   page: 1,
   limit: 20,
   industry: '',
   level: '',
+  company_id: initialCompanyId as number | undefined,
 })
 
 const form = reactive({
@@ -66,6 +82,17 @@ const dialogTitle = computed(() => (editingId.value === null ? '新建岗位' : 
 
 const sectionsOf = (row: JobItem): PortraitSection[] => jobPortraitSections(row)
 
+const fetchCompanies = async () => {
+  try {
+    const res = await get<{ items: CompanyOption[] }>('/v1/admin/companies', {
+      params: { limit: 100, only_with_jobs: true, sort: 'job_count' },
+    })
+    companies.value = res.items
+  } catch {
+    // error handled by interceptor
+  }
+}
+
 const fetchData = async () => {
   loading.value = true
   try {
@@ -75,6 +102,7 @@ const fetchData = async () => {
     }
     if (query.industry) params.industry = query.industry
     if (query.level) params.level = query.level
+    if (query.company_id) params.company_id = query.company_id
     const res = await get<{ items: JobItem[]; total: number }>('/v1/admin/jobs', { params })
     tableData.value = res.items
     total.value = res.total
@@ -206,13 +234,31 @@ const openPortrait = (row: JobItem, section: PortraitSection) => {
   detailVisible.value = true
 }
 
-onMounted(fetchData)
+onMounted(async () => {
+  await fetchCompanies()
+  await fetchData()
+})
 </script>
 
 <template>
   <div>
     <el-card class="data-card">
       <div class="toolbar">
+        <el-select
+          v-model="query.company_id"
+          placeholder="全部公司"
+          style="width: 220px"
+          clearable
+          filterable
+          @change="handleSearch"
+        >
+          <el-option
+            v-for="c in companies"
+            :key="c.id"
+            :label="`${c.name}（${c.job_count}）`"
+            :value="c.id"
+          />
+        </el-select>
         <el-input v-model="query.industry" placeholder="行业" style="width: 150px" clearable />
         <el-input v-model="query.level" placeholder="级别" style="width: 150px" clearable />
         <el-button type="primary" @click="handleSearch">搜索</el-button>
@@ -222,6 +268,9 @@ onMounted(fetchData)
       <el-table v-loading="loading" :data="tableData" stripe>
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="title" label="岗位名称" min-width="160" show-overflow-tooltip />
+        <el-table-column label="公司" width="160" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.company_name || '-' }}</template>
+        </el-table-column>
         <el-table-column prop="level" label="级别" width="80" />
         <el-table-column prop="industry" label="所属行业" width="120" show-overflow-tooltip />
         <el-table-column prop="education_requirement" label="学历要求" width="100" show-overflow-tooltip />

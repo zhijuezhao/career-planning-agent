@@ -1,13 +1,14 @@
-"""导入任务的后台执行器：接真实 6 阶段流水线 + 阶段级进度落库。
+"""导入任务的后台执行器：接真实 6+1 阶段流水线 + 阶段级进度落库。
 
 S7-3 范围（父计划 §4 / 子计划 §3）：
 - 用 ``compile_import_pipeline().astream()`` 接真实流水线（原先造 100 条假数据已删）；
-- 6 阶段 → 进度百分比（D-S7-5=A），**每阶段 commit**，让 ``/progress`` 与 SSE 看得见推进；
+- 阶段 → 进度百分比（D-S7-5=A），**每阶段 commit**，让 ``/progress`` 与 SSE 看得见推进；
 - 计数映射 ``total_input→total_rows``、``total_passed→success_count``、``total_rejected→error_count``；
 - D 级被拒原因写入有界 ``errors``（条数与单条长度都截断，避免 JSONB 膨胀）；
 - 任一异常 → **整单 failed**（D-S7-6=A），``errors`` 给出原因。
 
-**仍不落库岗位数据**：``job_profiles`` / ``job_raw_data`` 的写入属于 S7-4 范围。
+B2-2 追加：流水线末尾新增 ``persist`` 阶段（第 7 阶段）真正落库 ——
+``job_raw_data`` + ``job_profiles``(+ ``companies``)，统计写进 ``data_import_jobs.stats.persist``。
 """
 
 from __future__ import annotations
@@ -26,16 +27,18 @@ from app.infrastructure.database import async_session_factory
 # ``app/config.py`` 的 ``settings.import_max_rows``（可被 ``IMPORT_MAX_ROWS`` 覆盖）。
 IMPORT_MAX_ROWS = 50
 
-# D-S7-5=A：6 阶段 → 进度百分比。前端既有契约是
+# D-S7-5=A：阶段 → 进度百分比。前端既有契约是
 # ``progress_pct = processed_rows / total_rows``（子计划 §1.4 不改前端契约），
 # 因此阶段进度按 ``total_rows`` 折算进 ``processed_rows``，而不是新增字段。
+# B2-2：末尾多了一个真正落库的 persist 阶段，故 portrait 从 100 降到 92。
 STAGE_PROGRESS: dict[str, int] = {
     "load_data": 16,
     "clean_data": 33,
     "dedup": 50,
     "quality_judge": 66,
     "extract": 83,
-    "portrait": 100,
+    "portrait": 92,
+    "persist": 100,
 }
 
 # ``errors`` 是 JSONB，必须设上限：D 级行可能成百上千。
@@ -141,6 +144,11 @@ def _apply_stage(job: DataImportJob, node: str, state: dict) -> None:
             state.get("rejected_rows") or [],
             state.get("quality_results") or [],
         )
+
+    if node == "persist":
+        # B2-2：落库统计可见（前端导入详情可直接展示"入库 N 条 / 新建 vs 更新"）
+        persist_stats = state.get("persist_stats") or {}
+        job.stats = {**(job.stats or {}), "persist": persist_stats}
 
 
 def _summarize_rejections(rejected_rows: list[dict], quality_results: list[dict]) -> list[str]:

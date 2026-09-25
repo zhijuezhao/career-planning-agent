@@ -5,6 +5,8 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 from loguru import logger
 
+from app.infrastructure.database import async_session_factory
+
 
 class JobImportState(TypedDict, total=False):
     """State for the job import pipeline.
@@ -36,6 +38,9 @@ class JobImportState(TypedDict, total=False):
 
     # Stage 6: Portrait
     portrait_rows: list[dict]
+
+    # Stage 7: Persist（B2-2）
+    persist_stats: dict
 
     # Output
     total_input: int
@@ -177,6 +182,64 @@ def _row_to_text(row: dict) -> str:
     return "\n".join(parts)
 
 
+def merge_rows_for_persist(state: JobImportState) -> list[dict]:
+    """把流水线产物合并成可落库的行（B2-2）。
+
+    合并顺序 = 优先级从低到高：LLM 提取 → LLM 画像 → **清洗后的原表行**。
+    即「表格值优先」（与 §4.3 的链接合并规则同一原则）：LLM 只补表格缺的字段，
+    不覆盖导入表里的原文（title/company/city/salary/description/requirements）。
+    """
+    rows = state.get("passed_rows") or []
+    extracted = state.get("extracted_rows") or []
+    portraits = state.get("portrait_rows") or []
+
+    merged: list[dict] = []
+    for index, row in enumerate(rows):
+        data: dict = {}
+        if index < len(extracted) and isinstance(extracted[index], dict):
+            data.update(extracted[index])
+        if index < len(portraits) and isinstance(portraits[index], dict):
+            data.update(portraits[index])
+        if isinstance(row, dict):
+            data.update(row)
+        merged.append(data)
+    return merged
+
+
+async def node_persist(state: JobImportState) -> dict:
+    """第 7 阶段（B2-2）：把通过质检的行落库 —— job_raw_data + job_profiles(+companies)。
+
+    单行失败只计入 `persist_stats.failed`，不影响整单（导入是批量场景）。
+    原先 S7-3 只跑到 portrait 不落库，行级统计见 `data_import_jobs.stats.persist`。
+    """
+    from app.domain.services.job_persist_service import persist_import_rows
+
+    rows = merge_rows_for_persist(state)
+    if not rows:
+        logger.info("Import: nothing to persist | passed=0")
+        return {
+            "persist_stats": {"raw_written": 0, "profiles_new": 0, "profiles_updated": 0, "failed": 0},
+            "status": "completed",
+        }
+
+    async with async_session_factory() as session:
+        try:
+            stats = await persist_import_rows(session, rows)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+    logger.info(
+        "Import: persisted | raw={} new={} updated={} failed={}",
+        stats["raw_written"],
+        stats["profiles_new"],
+        stats["profiles_updated"],
+        stats["failed"],
+    )
+    return {"persist_stats": stats, "status": "completed"}
+
+
 def build_import_pipeline() -> StateGraph:
     graph = StateGraph(JobImportState)
 
@@ -186,6 +249,7 @@ def build_import_pipeline() -> StateGraph:
     graph.add_node("quality_judge", node_quality_judge)
     graph.add_node("extract", node_extract)
     graph.add_node("portrait", node_portrait)
+    graph.add_node("persist", node_persist)
 
     graph.set_entry_point("load_data")
     graph.add_edge("load_data", "clean_data")
@@ -193,7 +257,8 @@ def build_import_pipeline() -> StateGraph:
     graph.add_edge("dedup", "quality_judge")
     graph.add_edge("quality_judge", "extract")
     graph.add_edge("extract", "portrait")
-    graph.add_edge("portrait", END)
+    graph.add_edge("portrait", "persist")
+    graph.add_edge("persist", END)
 
     return graph
 

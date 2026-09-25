@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
 from app.core.matching import embed_job
+from app.domain.models.company import Company
 from app.domain.models.job import JobProfile
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
@@ -19,12 +20,28 @@ from app.schemas.admin import (
 router = APIRouter()
 
 
+async def _company_names(db: AsyncSession, jobs: list[JobProfile]) -> dict[int, str]:
+    """给当前页的岗位批量补 company_name（一次查询，不做 N+1）。"""
+    company_ids = {j.company_id for j in jobs if j.company_id is not None}
+    if not company_ids:
+        return {}
+    rows = await db.execute(select(Company.id, Company.name).where(Company.id.in_(company_ids)))
+    return {row[0]: row[1] for row in rows.all()}
+
+
+def _job_response(job: JobProfile, company_name: str | None = None) -> JobProfileResponse:
+    data = JobProfileResponse.model_validate(job)
+    data.company_name = company_name
+    return data
+
+
 @router.get("", response_model=JobProfileListResponse)
 async def list_jobs(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     industry: str | None = None,
     level: str | None = None,
+    company_id: int | None = Query(None, description="按公司实体筛选（B2-2）"),
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -38,16 +55,20 @@ async def list_jobs(
     if level:
         query = query.where(JobProfile.level == level)
         count_query = count_query.where(JobProfile.level == level)
+    if company_id is not None:
+        query = query.where(JobProfile.company_id == company_id)
+        count_query = count_query.where(JobProfile.company_id == company_id)
 
     total = (await db.execute(count_query)).scalar() or 0
 
     query = query.order_by(JobProfile.id.desc()).offset(skip).limit(limit)
     result = await db.execute(query)
-    jobs = result.scalars().all()
+    jobs = list(result.scalars().all())
+    names = await _company_names(db, jobs)
 
     return JobProfileListResponse(
         total=total,
-        items=[JobProfileResponse.model_validate(j) for j in jobs],
+        items=[_job_response(j, names.get(j.company_id)) for j in jobs],
     )
 
 
@@ -61,7 +82,8 @@ async def get_job(
     job = await db.get(JobProfile, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job profile not found")
-    return job
+    names = await _company_names(db, [job])
+    return _job_response(job, names.get(job.company_id))
 
 
 @router.post("", response_model=JobProfileResponse, status_code=status.HTTP_201_CREATED)

@@ -1,3 +1,4 @@
+from app.domain.models.company import Company
 from app.domain.models.dimension_score import DimensionScore
 from app.domain.models.dimension_weight import DimensionWeight
 from app.domain.models.import_job import DataImportJob
@@ -22,4 +23,5 @@ __all__ = [
     "DataImportJob", "StudentProfile",
     "ProfileSnapshot", "ReportRecord",
     "LLMProvider", "LLMModel", "LLMRoute",
+    "Company",
 ]

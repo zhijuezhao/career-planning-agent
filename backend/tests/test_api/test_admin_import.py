@@ -1,5 +1,6 @@
 import asyncio
 import io
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from app.api.v1.admin import _import_runner, import_module
 from app.config import get_settings
+from app.core.job_agent.graphs import import_pipeline
 from app.domain.models.import_job import DataImportJob
 from app.main import app
 from fastapi.testclient import TestClient
@@ -62,6 +64,7 @@ async def _read_job_full(job_id: int) -> dict | None:
             "success": row.success_count,
             "error": row.error_count,
             "errors": list(row.errors or []),
+            "stats": dict(row.stats or {}),  # B2-2：persist 阶段统计
         }
 
 
@@ -76,6 +79,45 @@ async def _count_table(table: str) -> int:
 
 def _count_rows(table: str) -> int:
     return asyncio.run(_count_table(table))
+
+
+def _max_id(table: str) -> int:
+    """表当前最大自增 id（用于「只清理本次新增」的精确边界）。"""
+
+    async def _run() -> int:
+        async with _probe_session_factory() as session:
+            return int(
+                (await session.execute(text(f"SELECT coalesce(max(id), 0) FROM {table}"))).scalar_one()
+            )
+
+    return asyncio.run(_run())
+
+
+async def _noop_persist(state: dict) -> dict:
+    """persist 阶段的空替身：给「只关心进度/计数」的用例用，避免它们写库。"""
+    return {"persist_stats": {}, "status": "completed"}
+
+
+class _PersistControl:
+    """默认把 persist 阶段换成空替身；需要验证真落库的用例调用 `enable()`。
+
+    为什么默认关：本模块多数用例只验证进度/计数映射，真落库会往 dev 库写数据、
+    还会让持久化引擎在多个 `asyncio.run` 事件循环间复用连接（S1 的坑）。
+    """
+
+    def __init__(self, monkeypatch, real):
+        self._monkeypatch = monkeypatch
+        self._real = real
+
+    def enable(self) -> None:
+        self._monkeypatch.setattr(import_pipeline, "node_persist", self._real)
+
+
+@pytest.fixture(autouse=True)
+def persist_control(monkeypatch) -> _PersistControl:
+    real = import_pipeline.node_persist
+    monkeypatch.setattr(import_pipeline, "node_persist", _noop_persist)
+    return _PersistControl(monkeypatch, real)
 
 
 def _upload(client: TestClient, token: str, filename: str, content: bytes):
@@ -380,24 +422,102 @@ class TestImportS71StateMachine:
         assert status == "failed"
         assert errors and "未找到上传文件" in errors[0]
 
-    def test_runner_writes_no_fake_rows(self, admin_token: str, client: TestClient, monkeypatch):
-        """回归：原实现会造 100 条假岗位 —— 现在必须一条不写。
+    def test_runner_writes_only_the_imported_rows(
+        self, admin_token: str, client: TestClient, monkeypatch, persist_control
+    ):
+        """原为「一条不写」的回归（防造 100 条假数据）。
 
-        S7-4 会把「落库」接上，届时本用例要改为「只写该写的那几行」。
+        B2-2 起落库已接上（流水线末尾 `persist` 阶段），因此本用例按它自己的注释
+        改为「**只写该写的那几行**」：3 家公司 + 3 条岗位 + 3 条原始行，
+        `data_import_jobs.stats.persist` 如实记录，岗位挂到正确的公司上。
+
+        为了断言「新建」而不是「更新」，CSV 里的岗位名/公司名带本次唯一后缀；
+        跑完按后缀精确清理（不用 id 边界，避免误删并发写入的数据）。
         """
-        job_id = _upload(client, admin_token, "s71_nofake.csv", THREE_ROW_CSV).json()["id"]
+        suffix = str(int(time.time() * 1000))
+        csv = (
+            "岗位名称,公司名称,工作城市\n"
+            f"数据分析师{suffix},A公司{suffix},北京\n"
+            f"后端工程师{suffix},B公司{suffix},上海\n"
+            f"产品经理{suffix},C公司{suffix},深圳\n"
+        ).encode("utf-8")
+
+        job_id = _upload(client, admin_token, "s71_nofake.csv", csv).json()["id"]
         self._start_job_without_scheduling(client, admin_token, job_id, monkeypatch)
+        monkeypatch.setattr(import_pipeline, "async_session_factory", _probe_session_factory)
+        persist_control.enable()  # 本用例专门验证真落库
 
-        raw_before = _count_rows("job_raw_data")
-        profiles_before = _count_rows("job_profiles")
+        try:
+            with mock_llm_tools():
+                asyncio.run(import_module._process_import(job_id))
 
-        with mock_llm_tools():
-            asyncio.run(import_module._process_import(job_id))
+            status, _total, errors = _job_snapshot(job_id)
+            assert status == "completed", errors
 
-        status, _total, errors = _job_snapshot(job_id)
-        assert status == "completed", errors
-        assert _count_rows("job_raw_data") == raw_before
-        assert _count_rows("job_profiles") == profiles_before
+            detail = _job(job_id) or {}
+            persist = (detail.get("stats") or {}).get("persist") or {}
+            assert persist.get("raw_written") == 3
+            assert persist.get("profiles_new") == 3
+            assert persist.get("profiles_updated") == 0
+            assert persist.get("failed") == 0
+
+            # 接口也要把 stats 暴露出去（前端导入详情要展示落库/扣费统计）
+            api_job = client.get(
+                f"/api/v1/admin/import/{job_id}", headers={"Authorization": f"Bearer {admin_token}"}
+            ).json()
+            assert api_job["stats"]["persist"]["profiles_new"] == 3
+
+            async def _persisted() -> list[tuple[str, str | None, int | None]]:
+                async with _probe_session_factory() as session:
+                    rows = (
+                        await session.execute(
+                            text(
+                                "SELECT j.title, c.name, c.job_count "
+                                "FROM job_profiles j LEFT JOIN companies c ON c.id = j.company_id "
+                                "WHERE j.title LIKE :p ORDER BY j.title"
+                            ),
+                            {"p": f"%{suffix}"},
+                        )
+                    ).all()
+                    return [(r[0], r[1], r[2]) for r in rows]
+
+            assert asyncio.run(_persisted()) == [
+                (f"产品经理{suffix}", f"C公司{suffix}", 1),
+                (f"后端工程师{suffix}", f"B公司{suffix}", 1),
+                (f"数据分析师{suffix}", f"A公司{suffix}", 1),
+            ]
+
+            # 原始行也写了 3 条（source=import）
+            async def _raw_count() -> int:
+                async with _probe_session_factory() as session:
+                    return int(
+                        (
+                            await session.execute(
+                                text(
+                                    "SELECT count(*) FROM job_raw_data "
+                                    "WHERE title LIKE :p AND source = 'import'"
+                                ),
+                                {"p": f"%{suffix}"},
+                            )
+                        ).scalar_one()
+                    )
+
+            assert asyncio.run(_raw_count()) == 3
+        finally:
+            async def _cleanup_suffix() -> None:
+                async with _probe_session_factory() as session:
+                    await session.execute(
+                        text("DELETE FROM job_profiles WHERE title LIKE :p"), {"p": f"%{suffix}"}
+                    )
+                    await session.execute(
+                        text("DELETE FROM job_raw_data WHERE title LIKE :p"), {"p": f"%{suffix}"}
+                    )
+                    await session.execute(
+                        text("DELETE FROM companies WHERE name LIKE :p"), {"p": f"%{suffix}"}
+                    )
+                    await session.commit()
+
+            asyncio.run(_cleanup_suffix())
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +671,8 @@ class TestImportS73RealPipeline:
         job_id = _upload(client, token, "s73_real.csv", THREE_ROW_CSV).json()["id"]
         assert _process(client, token, job_id).status_code == 200
         monkeypatch.setattr(_import_runner, "async_session_factory", _probe_session_factory)
+        # persist 阶段的空替身由模块级 autouse fixture `persist_control` 统一挂在，
+        # 本类只验证「进度/计数映射」，不往 dev 库写数据。
         with mock_llm_tools(judge_result):
             asyncio.run(import_module._process_import(job_id))
         return job_id

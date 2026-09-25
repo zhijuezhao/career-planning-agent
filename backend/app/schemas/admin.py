@@ -48,8 +48,11 @@ class JobProfileResponse(BaseModel):
     title: str
     industry: str | None
     level: str | None
-    hard_skills: dict | None
-    soft_skills: dict | None
+    # JSONB 实际允许两种形状：画像结构（dict，含 tags/education 等）或提取器直接给的技能数组
+    # （list）。`job_matcher.build_job_text` 两种都支持，这里不能只收 dict，
+    # 否则一条 list 形状的历史/导入数据会让整个岗位列表 500。
+    hard_skills: dict | list | None
+    soft_skills: dict | list | None
     salary_range: str | None
     education_requirement: str | None
     experience_requirement: str | None
@@ -59,6 +62,9 @@ class JobProfileResponse(BaseModel):
     outlook: dict | None
     summary: str | None
     source_data_ids: dict | None
+    # B2-2：公司实体（company_name 由接口 join 填充，ORM 上不存在该列）
+    company_id: int | None = None
+    company_name: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -69,8 +75,8 @@ class JobProfileCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     industry: str | None = Field(None, max_length=100)
     level: str | None = Field(None, max_length=20)
-    hard_skills: dict | None = None
-    soft_skills: dict | None = None
+    hard_skills: dict | list | None = None
+    soft_skills: dict | list | None = None
     salary_range: str | None = Field(None, max_length=50)
     education_requirement: str | None = Field(None, max_length=50)
     experience_requirement: str | None = Field(None, max_length=100)
@@ -85,8 +91,8 @@ class JobProfileUpdate(BaseModel):
     title: str | None = Field(None, min_length=1, max_length=200)
     industry: str | None = Field(None, max_length=100)
     level: str | None = Field(None, max_length=20)
-    hard_skills: dict | None = None
-    soft_skills: dict | None = None
+    hard_skills: dict | list | None = None
+    soft_skills: dict | list | None = None
     salary_range: str | None = Field(None, max_length=50)
     education_requirement: str | None = Field(None, max_length=50)
     experience_requirement: str | None = Field(None, max_length=100)
@@ -367,6 +373,8 @@ class ImportJobResponse(BaseModel):
     success_count: int
     error_count: int
     errors: list | None
+    # B2-2：落库统计（persist 阶段）；B3 会加链接解析/token 统计，前端导入详情直接展示
+    stats: dict | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -503,3 +511,48 @@ class LLMConnectivityTestResponse(BaseModel):
     dim_expected: int | None = None
     output_preview: str | None = None
     detail: str = ""
+
+
+# ── Company Admin Schemas（B2-2，需求 3：公司信息导航）───────────────────────
+
+class CompanyResponse(BaseModel):
+    id: int
+    name: str
+    industry: str | None
+    city: str | None
+    job_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CompanyUpdate(BaseModel):
+    """人工修正公司信息（导入自动识别的值可改）。全部可选，不传=不改。"""
+    name: str | None = Field(None, min_length=1, max_length=200)
+    industry: str | None = Field(None, max_length=100)
+    city: str | None = Field(None, max_length=50)
+
+
+class CompanyJobSummary(BaseModel):
+    """公司详情里的岗位摘要（完整字段请走岗位管理页）。"""
+    id: int
+    title: str
+    industry: str | None = None
+    level: str | None = None
+    salary_range: str | None = None
+    created_at: datetime
+
+
+class CompanyDetail(CompanyResponse):
+    jobs: list[CompanyJobSummary] = []
+
+
+class CompanyListResponse(BaseModel):
+    total: int
+    items: list[CompanyResponse]
+
+
+class CompanySyncResponse(BaseModel):
+    synced: int
+    with_jobs: int
