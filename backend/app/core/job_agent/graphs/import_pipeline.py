@@ -182,12 +182,29 @@ def _row_to_text(row: dict) -> str:
     return "\n".join(parts)
 
 
+def _overlay_non_empty(target: dict, source: dict) -> None:
+    """把 source 里**有值**的键覆盖到 target（空值视为「本次没提供」）。
+
+    为什么不能直接 `target.update(source)`：表格的空单元格清洗后仍是 `company: None`
+    这样的键，直接 update 会把 LLM 提取阶段补好的公司名**抹掉**
+    （实测：AI 从岗位描述里解析出公司名，落库却成了 NULL）。
+    与 `job_persist_service._pick` 保持同一语义：空值不覆盖已有值。
+    """
+    for key, value in source.items():
+        if value not in (None, "", [], {}):
+            target[key] = value
+
+
 def merge_rows_for_persist(state: JobImportState) -> list[dict]:
     """把流水线产物合并成可落库的行（B2-2）。
 
     合并顺序 = 优先级从低到高：LLM 提取 → LLM 画像 → **清洗后的原表行**。
     即「表格值优先」（与 §4.3 的链接合并规则同一原则）：LLM 只补表格缺的字段，
     不覆盖导入表里的原文（title/company/city/salary/description/requirements）。
+
+    ⚠️ 空值不参与覆盖：表格「公司名称」列是空单元格（清洗后 `company: None`）时，
+    LLM 从岗位描述里解析出的公司会保留 —— 这正是「AI 解析填入公司字段」的路径；
+    表格里写了公司则仍然以表格为准。
     """
     rows = state.get("passed_rows") or []
     extracted = state.get("extracted_rows") or []
@@ -197,11 +214,11 @@ def merge_rows_for_persist(state: JobImportState) -> list[dict]:
     for index, row in enumerate(rows):
         data: dict = {}
         if index < len(extracted) and isinstance(extracted[index], dict):
-            data.update(extracted[index])
+            _overlay_non_empty(data, extracted[index])
         if index < len(portraits) and isinstance(portraits[index], dict):
-            data.update(portraits[index])
+            _overlay_non_empty(data, portraits[index])
         if isinstance(row, dict):
-            data.update(row)
+            _overlay_non_empty(data, row)
         merged.append(data)
     return merged
 

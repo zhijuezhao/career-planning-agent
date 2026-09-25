@@ -6,6 +6,7 @@ from app.core.job_agent.graphs.import_pipeline import (
     _row_to_text,
     build_import_pipeline,
     compile_import_pipeline,
+    merge_rows_for_persist,
     node_clean_data,
     node_dedup,
     node_load_data,
@@ -42,6 +43,59 @@ class TestRowToText:
         assert "title: 前端" in text
         assert "description" not in text
         assert "requirements" not in text
+
+
+class TestMergeRowsForPersist:
+    """B2-2/B2-3：落库前的合并规则（表格值优先，但**空值不覆盖 AI 结果**）。"""
+
+    def _state(self, row: dict, extracted: dict, portrait: dict | None = None) -> dict:
+        return {
+            "passed_rows": [row],
+            "extracted_rows": [extracted],
+            "portrait_rows": [portrait or {"five_dimensions": {}, "career_paths": []}],
+        }
+
+    def test_ai_company_survives_empty_table_cell(self):
+        """表格「公司名称」空单元格（company=None）→ 采用 LLM 解析出的公司。
+
+        这是"AI 解析填入公司字段"的核心路径：修复前 `data.update(row)` 会把 AI 值抹成 None。
+        """
+        merged = merge_rows_for_persist(
+            self._state(
+                {"title": "后端工程师", "company": None, "city": "北京"},
+                {"title": "后端工程师", "company": "AI解析科技有限公司", "salary": "20-30K"},
+            )
+        )
+        assert merged[0]["company"] == "AI解析科技有限公司"
+        assert merged[0]["salary"] == "20-30K"
+
+    def test_table_company_wins_when_present(self):
+        merged = merge_rows_for_persist(
+            self._state(
+                {"title": "后端工程师", "company": "表格里的公司", "city": "北京"},
+                {"company": "AI 猜的公司"},
+            )
+        )
+        assert merged[0]["company"] == "表格里的公司"
+
+    def test_empty_ai_values_do_not_wipe_table_values(self):
+        """反向也要成立：AI 返回空串/空列表时不能把表格里已有的值清掉。"""
+        merged = merge_rows_for_persist(
+            self._state(
+                {"title": "岗位", "company": "表格公司", "salary": "20-30K"},
+                {"company": "", "salary": None, "hard_skills": [], "summary": None},
+            )
+        )
+        assert merged[0]["company"] == "表格公司"
+        assert merged[0]["salary"] == "20-30K"
+        assert "hard_skills" not in merged[0]
+
+    def test_ai_title_used_when_table_title_empty(self):
+        """表格标题空 → 用 AI 标题（否则该行会以 "title is required" 落库失败）。"""
+        merged = merge_rows_for_persist(
+            self._state({"title": None, "company": "A公司"}, {"title": "AI 提取的岗位名"})
+        )
+        assert merged[0]["title"] == "AI 提取的岗位名"
 
 
 class TestJobImportState:
