@@ -460,17 +460,22 @@ async def delete_llm_model(
 # ── 功能路由 ────────────────────────────────────────────────────────────────
 
 
-def _runtime_default_hint() -> str:
-    """运行时真正兜底的模型名。
+#: 未绑定 `default` 时的显示口径。必须与 `gateway.NO_DEFAULT_MODEL_HINT` 同义：
+#: 2026-09-25（用户决策②）起，DB 里有模型**不再**自动接管默认。
+_NO_DEFAULT_LABEL = "无默认模型（未绑定 default）"
 
-    DB 一旦有可用 chat 模型（且未绑 default 路由），网关默认取第一个 DB 模型，
-    此时 env `llm_default_model` 已不参与 —— 页面必须跟着说真话，否则管理员会误判。
+
+def _runtime_default_hint() -> str:
+    """运行时真正生效的默认模型名。
+
+    ② 之前：DB 一旦有可用 chat 模型（且未绑 `default`），网关取第一个 DB 模型 →
+    页面得跟着说"取第一个可用模型"。
+    ② 之后：**只有显式绑定 `default` 才有默认模型**；没绑就是没有，页面必须如实显示
+    （否则管理员会以为还有兜底，实际调用会直接报错）。
     """
     snapshot = get_registry_snapshot()
     if snapshot is not None and snapshot.chat_configs:
-        return snapshot.default_gateway_key or (
-            snapshot.fallback_order[0] if snapshot.fallback_order else "（无可用模型）"
-        )
+        return snapshot.default_gateway_key or _NO_DEFAULT_LABEL
     return get_settings().llm_default_model
 
 
@@ -486,7 +491,7 @@ def _env_effective(meta: FunctionKeyMeta) -> str:
     db_default = snapshot is not None and bool(snapshot.chat_configs)
     if meta.key == "default":
         if db_default:
-            return f"未绑 default → 运行时取第一个可用 DB 模型（当前：{_runtime_default_hint()}）"
+            return f"未绑 default → {_NO_DEFAULT_LABEL}，需显式绑定"
         return f"env llm_default_model（当前：{settings.llm_default_model}）"
     return f"跟随 default（当前：{_runtime_default_hint()}）"
 

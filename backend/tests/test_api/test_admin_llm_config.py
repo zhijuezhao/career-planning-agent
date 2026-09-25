@@ -449,11 +449,12 @@ class TestRoutes:
         finally:
             assert _bind(client, admin_token, "default", None).status_code == 200
 
-        # 解绑后 default 路由消失（DB 有模型但没绑 default 时，默认取第一个可用模型，
-        # env 的 llm_default_model 只在 DB 完全没配置时生效）
+        # 解绑后 default 路由消失：②（2026-09-25 决策）起不再"取第一个可用模型"，
+        # 未绑 default = 没有默认模型（env 的 llm_default_model 只在 DB 完全没配置时生效）
         snapshot = get_registry_snapshot()
         assert snapshot is not None and snapshot.default_gateway_key is None
         assert "default" not in get_llm_gateway().list_function_routes()
+        assert get_llm_gateway().current_model == ""  # 页面所述 = 网关真实行为
 
 
 # ── 连通性测试 ──────────────────────────────────────────────────────────────
@@ -598,14 +599,18 @@ class TestB41Wiring:
         finally:
             assert _bind(client, admin_token, "job_link_extract", None).status_code == 200
 
-    def test_unbound_default_reports_db_runtime_default(self, client, admin_token, provider, chat_model):
-        """DB 有模型但未绑 default 时，页面必须说清"运行时取第一个 DB 模型"，不能还写 env 名字。"""
-        key = f"{provider['name']}:{chat_model['model_name']}"
+    def test_unbound_default_reports_no_default(self, client, admin_token, provider, chat_model):
+        """② 后：DB 有模型但未绑 default → 页面必须说"没有默认模型"，且网关真的没有。
+
+        改前语义是「运行时取第一个 DB 模型」，由用户 2026-09-25 决策② 取消。
+        """
+        model_name = chat_model["model_name"]
         routes = _routes(client, admin_token)
         assert routes["default"]["source"] == "env"  # 没绑就是没绑
-        assert key in routes["default"]["effective"]
-        assert key in routes["job_quality"]["effective"]
-        assert get_llm_gateway().current_model == key  # 页面所述 = 网关真实行为
+        assert "未绑 default" in routes["default"]["effective"]
+        assert model_name not in routes["default"]["effective"]
+        assert model_name not in routes["job_quality"]["effective"]
+        assert get_llm_gateway().current_model == ""  # 页面所述 = 网关真实行为
 
     def test_embedding_route_feeds_get_embeddings(self, client, admin_token, embed_model, monkeypatch):
         """绑定 embedding 路由后，get_embeddings() 构造参数应换成 DB 里的模型。"""

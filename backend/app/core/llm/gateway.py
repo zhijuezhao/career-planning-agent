@@ -46,6 +46,13 @@ class UnknownModelError(LLMGatewayError):
     """引用了未注册的模型名（快速失败，便于发现管理端配置错误）。"""
 
 
+#: 没有默认模型时的统一提示（面向管理员，必须可执行：说清楚去哪里绑）
+NO_DEFAULT_MODEL_HINT = (
+    "未配置默认模型：请在管理端「系统配置 → 功能路由」把 default 绑定到一个模型"
+    "（或设置 env LLM_DEFAULT_MODEL）。DB 中存在模型不会自动接管默认（2026-09-25 决策②）"
+)
+
+
 class LLMGateway:
     """多模型网关，支持运行时热切换与失败自动 fallback。"""
 
@@ -92,15 +99,16 @@ class LLMGateway:
                 if spec.kind == "chat" and spec.gateway_key in self._models
             }
 
-        # 默认模型：显式指定 > DB 的 default 路由 > 配置默认（若已注册）> 任一可用
+        # 默认模型：显式指定 > DB 的 default 路由 > 配置默认（若已注册）。
+        # ⚠️ 2026-09-25（用户决策②）：**取消"任一可用模型"兜底** —— DB 里存在 chat 模型
+        # 不等于它该当默认；未显式绑定 `default` 就视为**没有默认模型**，调用时明确报错
+        # （见 `_resolve_chain`）。旧行为"谁排在前面谁生效"会让管理员看不出为什么是它。
         if default_model is not None:
             self._current_model = default_model
         elif snapshot is not None and snapshot.default_gateway_key in self._models:
             self._current_model = snapshot.default_gateway_key
         elif settings.llm_default_model in self._models:
             self._current_model = settings.llm_default_model
-        elif self._models:
-            self._current_model = next(iter(self._models))
         else:
             self._current_model = ""
 
@@ -158,6 +166,8 @@ class LLMGateway:
         .with_structured_output()，fallback 逻辑只封装在网关方法内。
         """
         name = model_name or self._current_model
+        if not name:
+            raise LLMGatewayError(NO_DEFAULT_MODEL_HINT)
         if name not in self._models:
             raise UnknownModelError(
                 f"Unknown model '{name}'. Available: {self.list_models()}"
@@ -178,8 +188,12 @@ class LLMGateway:
         """构建本次调用的供应商尝试顺序：主模型 + 其余 fallback。
 
         主模型选择：显式 model > 功能键绑定 > 当前默认。
+        ② 之后"当前默认"可能是空串（DB 有模型但没绑 `default`）→ 明确报错，
+        而不是拿 fallback 里的第一个模型顶上。
         """
         primary = model or self.resolve_function_key(function_key) or self._current_model
+        if not primary:
+            raise LLMGatewayError(NO_DEFAULT_MODEL_HINT)
         if primary not in self._models:
             raise UnknownModelError(
                 f"Unknown model '{primary}'. Available: {self.list_models()}"
@@ -262,6 +276,7 @@ __all__ = [
     "AllProvidersFailedError",
     "LLMGateway",
     "LLMGatewayError",
+    "NO_DEFAULT_MODEL_HINT",
     "UnknownModelError",
     "clear_gateway_cache",
     "get_llm_gateway",

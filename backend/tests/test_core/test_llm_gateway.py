@@ -104,6 +104,39 @@ def test_set_default_model_unknown_keeps_old():
     assert gw.current_model == "deepseek"
 
 
+# ---------- ② 无默认模型（2026-09-25 决策）----------
+# 模型名故意取一个不可能等于 env llm_default_model 的值，避免依赖本机 .env
+
+
+def test_no_default_model_raises_actionable_error():
+    """没有默认模型时明确报错，而不是拿"任一可用模型"顶上。"""
+    gw = LLMGateway(
+        models={"b24-only-model": FakeListChatModel(responses=["x"])},
+        default_model=None,
+        fallback_order=["b24-only-model"],
+    )
+    assert gw.list_models() == ["b24-only-model"]  # 模型注册了
+    assert gw.current_model == ""                  # 但默认是空
+
+    with pytest.raises(LLMGatewayError) as exc:
+        gw.get_model()
+    assert "default" in str(exc.value) and "功能路由" in str(exc.value)  # 提示可执行
+
+    with pytest.raises(LLMGatewayError):
+        gw._resolve_chain(None)
+
+
+async def test_ainvoke_without_default_model_raises():
+    gw = LLMGateway(
+        models={"b24-only-model": FakeListChatModel(responses=["x"])},
+        default_model=None,
+        fallback_order=["b24-only-model"],
+    )
+    with pytest.raises(LLMGatewayError) as exc:
+        await gw.ainvoke("hi")
+    assert "默认模型" in str(exc.value)
+
+
 # ---------- ainvoke ----------
 
 async def test_ainvoke_success():

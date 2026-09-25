@@ -19,7 +19,7 @@ from app.core.llm.embeddings import (
     ensure_vector_dim,
     get_embeddings,
 )
-from app.core.llm.gateway import LLMGateway, clear_gateway_cache
+from app.core.llm.gateway import LLMGateway, LLMGatewayError, clear_gateway_cache
 from app.core.llm.registry import (
     RegistrySnapshot,
     RouteSpec,
@@ -292,7 +292,8 @@ class TestGatewayFunctionRouting:
         gateway = LLMGateway()
         assert gateway.config_source == "db"
         assert gateway.list_models() == ["prov:chat-model"]
-        assert gateway.current_model == "prov:chat-model"
+        # ②（2026-09-25）：快照里有模型、但**没绑 default** → 不再隐式取第一个当默认
+        assert gateway.current_model == ""
 
     def test_function_key_resolves_to_bound_model(self, db_snapshot):
         gateway = LLMGateway()
@@ -305,7 +306,24 @@ class TestGatewayFunctionRouting:
     def test_resolve_chain_prefers_function_key(self, db_snapshot):
         gateway = LLMGateway()
         assert gateway._resolve_chain(None, "job_quality")[0] == "prov:chat-model"
-        assert gateway._resolve_chain(None, "job_portrait")[0] == "prov:chat-model"
+        # job_portrait 未绑定 → 回落默认；该快照没绑 default → ② 后没有默认模型，明确报错
+        with pytest.raises(LLMGatewayError) as exc:
+            gateway._resolve_chain(None, "job_portrait")
+        assert "默认模型" in str(exc.value)
+
+    def test_db_models_without_default_route_have_no_default(self, db_snapshot):
+        """② 回归：DB 有可用模型 ≠ 它接管默认。
+
+        改前语义是"未绑 default 时取第一个可用 DB 模型"（由用户 2026-09-25 决策② 取消），
+        现在必须表现为「没有默认模型 + 可执行的报错」，而不是悄悄用 `prov:chat-model`。
+        """
+        gateway = LLMGateway()
+        assert gateway.list_models() == ["prov:chat-model"]  # 模型确实注册了
+        assert gateway.current_model == ""                   # 但没有默认模型
+        with pytest.raises(LLMGatewayError) as exc:
+            gateway._resolve_chain(None)
+        message = str(exc.value)
+        assert "default" in message and "功能路由" in message  # 报错要能指导去哪绑
 
     def test_default_route_becomes_current_model(self):
         snapshot = RegistrySnapshot(
