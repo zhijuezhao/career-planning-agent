@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 import pytest
 from app.config import get_settings
 from app.main import app
+from app.utils.file_storage import save_upload_file
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -125,6 +127,26 @@ async def _dependent_counts(uid: int) -> dict[str, int]:
             )
         ).one()
         return {k: int(v) for k, v in row._mapping.items()}
+
+
+def _resolve_stored(raw: str) -> Path:
+    """把库里的 file_path（相对 backend 工作目录）解析成宿主绝对路径。"""
+    path = Path(raw)
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+async def _insert_resume(uid: int, file_path: str, content_hash: str) -> None:
+    """插一行简历记录（磁盘文件由 `save_upload_file` 按生产约定真实写盘）。"""
+    async with AsyncSession(_engine) as session:
+        await session.execute(
+            text(
+                "INSERT INTO resumes"
+                " (user_id, file_name, file_path, file_size, content_hash, version)"
+                " VALUES (:i, 'b24_cv.pdf', :p, 12, :h, 1)"
+            ),
+            {"i": uid, "p": file_path, "h": content_hash},
+        )
+        await session.commit()
 
 
 async def _purge(usernames: list[str]) -> None:
@@ -350,3 +372,43 @@ class TestUserManagement:
         assert data["chat_session_count"] == 1
         assert data["snapshot_count"] == 1
         assert data["profile_count"] == 1
+
+
+class TestResumeFileCleanup:
+    """附件①（2026-09-25 决定）：删用户时一并删该用户的简历磁盘文件。
+
+    背景：简历写盘位置是 `{settings.upload_dir}/user_<id>/`（`save_upload_file`），
+    而 `settings.upload_dir` 是相对 cwd 的 `./uploads` → 容器里即 `/app/backend/uploads`，
+    也就是宿主 `backend/uploads/`。此前删用户只删库行，文件永久留下：
+    实测该目录 106 个 PDF vs 库里 12 行，约 88% 是这么攒的。
+    """
+
+    def test_delete_user_removes_resume_files(self, admin_token: str, client: TestClient):
+        uid = _register(client, "files")
+        # 用生产同一个 helper 写盘，保证目录/命名约定与真实上传一致
+        stored_path, digest = save_upload_file(b"%PDF-1.4 b24 test pdf", uid, "b24_cv.pdf")
+        asyncio.run(_insert_resume(uid, stored_path, digest))
+        target = _resolve_stored(stored_path)
+        assert target.exists(), f"前置条件失败：{target} 不存在"
+
+        resp = client.delete(f"/api/v1/admin/users/{uid}", headers=_h(admin_token))
+        assert resp.status_code == 204, resp.text
+
+        assert not target.exists(), f"简历文件未被删除：{target}"
+        # 目录空了应一并清掉，否则磁盘上会攒一堆空 user_* 目录
+        assert not target.parent.exists(), f"空目录未清理：{target.parent}"
+
+    def test_path_guard_skips_files_outside_user_dir(self, admin_token: str, client: TestClient):
+        """`file_path` 指向别人目录/目录外时**不许删**（前缀校验，防越权删除）。"""
+        uid = _register(client, "guard")
+        victim = Path.cwd() / "uploads" / "b24_guard_victim.pdf"
+        victim.parent.mkdir(parents=True, exist_ok=True)
+        victim.write_bytes(b"%PDF-1.4 victim")
+        asyncio.run(_insert_resume(uid, "uploads/b24_guard_victim.pdf", "b24guardhash"))
+
+        try:
+            resp = client.delete(f"/api/v1/admin/users/{uid}", headers=_h(admin_token))
+            assert resp.status_code == 204, resp.text
+            assert victim.exists(), "目录外的文件被误删了（前缀校验失效）"
+        finally:
+            victim.unlink(missing_ok=True)

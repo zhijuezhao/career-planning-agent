@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
+from app.config import get_settings
 from app.core.roles import USER_ROLE_ADMIN, UserRole
 from app.domain.models.profile_snapshot import ProfileSnapshot
 from app.domain.models.report import ChatMessage, ChatSession
@@ -26,6 +28,57 @@ from app.schemas.admin import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _remove_resume_files(user_id: int, paths: list[str]) -> int:
+    """删除该用户简历的磁盘文件，返回实际删除数。
+
+    必须**在 DB 提交成功之后**调用（见 `delete_user`）：磁盘删除不可回滚，
+    顺序反过来就会出现「文件没了、库里还留着行」。
+
+    安全约束：只允许删 `{upload_dir}/user_{user_id}/` **目录内**的文件。`file_path` 是
+    历史/可被改写的值，做前缀校验可避免脏数据删到目录外的东西（越权删除）。
+
+    删除失败只记 warning、不让接口失败：库里的行已经删干净，重试也没有意义。
+    """
+    if not paths:
+        return 0
+
+    base_dir = Path(get_settings().upload_dir)
+    if not base_dir.is_absolute():
+        # `save_upload_file` 写盘时用的是相对 cwd 的 settings.upload_dir，
+        # 这里按同一基准还原成绝对路径，才能做前缀比较
+        base_dir = Path.cwd() / base_dir
+    allowed_dir = (base_dir / f"user_{user_id}").resolve()
+
+    removed = 0
+    for raw in paths:
+        try:
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = Path.cwd() / candidate
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(allowed_dir):
+                logger.warning(
+                    "skip resume file outside user dir | user=%s path=%s", user_id, raw
+                )
+                continue
+            resolved.unlink(missing_ok=True)
+            removed += 1
+        except OSError as exc:
+            logger.warning(
+                "cannot remove resume file | user=%s path=%s error=%s", user_id, raw, exc
+            )
+
+    # 目录空了顺手删掉，避免磁盘上留一堆空 user_* 目录
+    try:
+        if allowed_dir.is_dir() and not any(allowed_dir.iterdir()):
+            allowed_dir.rmdir()
+    except OSError as exc:
+        logger.warning(
+            "cannot remove resume dir | user=%s dir=%s error=%s", user_id, allowed_dir, exc
+        )
+    return removed
 
 
 @router.get("", response_model=AdminUserListResponse)
@@ -229,12 +282,23 @@ async def delete_user(
     `chat_messages`（经 session 子查询）→ `chat_sessions` → `resumes` → `users`。
     其余关联表（`profile_snapshots` / `report_records` / `student_profiles`）由数据库
     的 `ON DELETE CASCADE` 负责，无需在此重复删除。
+
+    另外（2026-09-25 决定，附件①）：简历的**磁盘文件**也一并删除 —— 此前只删库行，
+    文件永久留在 `uploads/user_<id>/`。实测该目录下已有 106 个 PDF 而库里只剩 12 行，
+    约 88% 是这么攒出来的。删文件发生在 DB 提交之后，且带路径前缀校验。
     """
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="不能删除当前登录的账号")
+
+    # 简历磁盘路径要在删行之前取出来（删完行就查不到了）
+    resume_paths = list(
+        (await db.execute(select(Resume.file_path).where(Resume.user_id == user_id)))
+        .scalars()
+        .all()
+    )
 
     session_ids = select(ChatSession.id).where(ChatSession.user_id == user_id)
     await db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
@@ -244,4 +308,16 @@ async def delete_user(
     # （以及依赖快照的 job_match_records / report_records）
     await db.delete(user)
     await db.flush()
-    logger.info("admin %s deleted user %s (%s)", current_user.id, user_id, user.username)
+
+    # `get_db` 的 commit 发生在请求返回**之后**，这里显式提交，保证
+    # 「库已删干净 → 才动磁盘」的顺序（重复 commit 无副作用）。
+    await db.commit()
+    removed_files = _remove_resume_files(user_id, resume_paths)
+    logger.info(
+        "admin %s deleted user %s (%s) | resumes_rows=%s files_removed=%s",
+        current_user.id,
+        user_id,
+        user.username,
+        len(resume_paths),
+        removed_files,
+    )
