@@ -350,36 +350,62 @@ async def _match_snapshot(
     max_distance: float | None,
     session,
 ) -> list[dict[str, Any]]:
+    results, _failures = await _match_snapshot_detailed(snapshot, top_k, max_distance, session)
+    return results
+
+
+async def _match_snapshot_detailed(
+    snapshot: ProfileSnapshot,
+    top_k: int,
+    max_distance: float | None,
+    session,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """打分主流程，返回 `(成功结果, 单岗位失败列表)`。
+
+    B2-3 起**单个岗位打分失败不再拖垮整轮**：原先循环里任何异常都会冒泡到
+    `match_user_to_jobs` 的兜底 try → 整轮返回 `[]`（学生端看到"0 个匹配"却不知为何）。
+    现在失败岗位单独收集，落库时记成 `status='failed'` 供管理端排查。
+    """
     # Step 1: Vector search against job embeddings (R-5.3: pass through top_k)
     hits = await search_jobs_by_vector(
         list(snapshot.embedding), top_k=top_k, max_distance=max_distance, session=session
     )
     if not hits:
-        return []
+        return [], []
 
     # Step 2: User dimension scores come from the snapshot's frozen JSON
     user_dims = _candidate_scores(snapshot)
 
     # Step 3: Score each hit
     results: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     for hit in hits:
         job_profile_id = hit["job_profile_id"]
         distance = hit["distance"]
 
-        # Job dimension scores (job side still reads DimensionScore job rows)
-        job_dims = await get_dimension_scores("job", job_profile_id, session=session)
+        try:
+            # Job dimension scores (job side still reads DimensionScore job rows)
+            job_dims = await get_dimension_scores("job", job_profile_id, session=session)
 
-        # Per-hit job-industry weights (R-5.1)
-        job_result = await session.execute(
-            select(JobProfile.industry).where(JobProfile.id == job_profile_id)
-        )
-        job_industry = job_result.scalar_one_or_none() or "技术研发岗"
-        weights = await get_dimension_weights(job_industry, session=session)
-        if not weights:
-            weights = {dim: 1.0 for dim in user_dims}
+            # Per-hit job-industry weights (R-5.1)
+            job_result = await session.execute(
+                select(JobProfile.industry).where(JobProfile.id == job_profile_id)
+            )
+            job_industry = job_result.scalar_one_or_none() or "技术研发岗"
+            weights = await get_dimension_weights(job_industry, session=session)
+            if not weights:
+                weights = {dim: 1.0 for dim in user_dims}
 
-        # Compute score
-        score, analysis = compute_match_score(distance, user_dims, job_dims, weights)
+            # Compute score
+            score, analysis = compute_match_score(distance, user_dims, job_dims, weights)
+        except Exception as exc:  # noqa: BLE001 - 行级容错，失败岗位单独报告
+            logger.warning(
+                "单岗位打分失败 | job_profile_id={} | error={}", job_profile_id, exc
+            )
+            failures.append(
+                {"job_profile_id": job_profile_id, "error": f"{type(exc).__name__}: {exc}"[:200]}
+            )
+            continue
 
         results.append({
             "job_profile_id": job_profile_id,
@@ -391,7 +417,7 @@ async def _match_snapshot(
     # Sort by score descending
     results.sort(key=lambda x: x["match_score"], reverse=True)
 
-    return results[:top_k]
+    return results[:top_k], failures
 
 
 async def match_user_to_jobs(
@@ -431,3 +457,32 @@ async def match_user_to_jobs(
     except Exception as exc:
         logger.warning("Match pipeline failed | user_id={} | error={}", user_id, exc)
         return []
+
+
+async def match_user_to_jobs_detailed(
+    user_id: int,
+    snapshot: ProfileSnapshot,
+    top_k: int = 10,
+    max_distance: float = 0.5,
+    session=None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """同 `match_user_to_jobs`，但额外返回单岗位失败列表（B2-3 落明细用）。
+
+    保留 `match_user_to_jobs` 的旧签名与返回值不变，避免影响既有调用点与测试。
+    """
+    user_vector = snapshot.embedding
+    if not user_vector or all(v == 0.0 for v in user_vector):
+        return [], []
+
+    own_session = session is None
+    if own_session:
+        session = async_session_factory()
+
+    try:
+        if own_session:
+            async with session:
+                return await _match_snapshot_detailed(snapshot, top_k, max_distance, session)
+        return await _match_snapshot_detailed(snapshot, top_k, max_distance, session)
+    except Exception as exc:  # noqa: BLE001 - 整轮失败仍然兜底为「无结果」
+        logger.warning("Match pipeline failed | user_id={} | error={}", user_id, exc)
+        return [], []

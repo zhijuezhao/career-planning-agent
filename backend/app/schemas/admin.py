@@ -556,3 +556,43 @@ class CompanyListResponse(BaseModel):
 class CompanySyncResponse(BaseModel):
     synced: int
     with_jobs: int
+
+
+# ── Match Record Admin Schemas（B2-3，需求 3：匹配明细）────────────────────────
+
+class AdminMatchRecordSummary(BaseModel):
+    """匹配明细列表项：**不含 analysis**（体积大，详情接口单独取）。"""
+    id: int
+    profile_snapshot_id: int
+    snapshot_serial_no: UUID | None = None
+    user_id: int | None = None
+    username: str | None = None
+    job_profile_id: int
+    job_title: str | None = None
+    rank: int
+    score: float | None
+    distance: float | None
+    status: str
+    duration_ms: int | None
+    matched_at: datetime
+
+
+class AdminMatchRecordDetail(AdminMatchRecordSummary):
+    """明细详情：附带完整打分分析（向量相似度 / 六维对比 / 权重）。"""
+    analysis: dict | None = None
+    job_industry: str | None = None
+
+
+class AdminMatchRecordListResponse(BaseModel):
+    total: int
+    items: list[AdminMatchRecordSummary]
+
+
+class AdminMatchRecordStats(BaseModel):
+    """明细总览（页面头部用）：条数、成功/失败、快照数、平均分与平均耗时。"""
+    total: int
+    success: int
+    failed: int
+    snapshots: int
+    avg_score: float | None = None
+    avg_duration_ms: float | None = None

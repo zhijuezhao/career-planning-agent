@@ -10,12 +10,18 @@ from sqlalchemy.orm import aliased
 
 from app.api.v1.admin.auth import require_admin
 from app.domain.models.dimension_weight import DimensionWeight
+from app.domain.models.job import JobProfile
+from app.domain.models.match_record import JobMatchRecord
 from app.domain.models.profile_snapshot import ProfileSnapshot
 from app.domain.models.report_record import ReportRecord
 from app.domain.models.user import User
 from app.domain.services import snapshot_markdown
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
+    AdminMatchRecordDetail,
+    AdminMatchRecordListResponse,
+    AdminMatchRecordStats,
+    AdminMatchRecordSummary,
     AdminSnapshotDetail,
     AdminSnapshotListResponse,
     AdminSnapshotSummary,
@@ -29,7 +35,171 @@ from app.schemas.admin import (
 router = APIRouter()
 
 
-# ── 画像快照（替代原「匹配结果」：匹配明细已不落表，改为看快照与匹配状态，D9）──
+# ── 匹配明细（B2-3）──────────────────────────────────────────────────────────
+#
+# 说明：B2-3 之前这里有句注释「匹配明细已不落表，改为看快照与匹配状态，D9」；
+# 现在 `job_match_records` 已建（B2-0）且学生端 /matching/run 会写明细（B2-3），
+# 故恢复「可逐条查看」的能力，快照列表保留作为入口。
+#
+# 列表接口刻意不返回 analysis（每条含六维对比与权重，20 条就能上百 KB），
+# 详情接口单独取。
+
+
+def _match_record_columns():
+    return (
+        JobMatchRecord.id,
+        JobMatchRecord.profile_snapshot_id,
+        JobMatchRecord.job_profile_id,
+        JobMatchRecord.rank,
+        JobMatchRecord.score,
+        JobMatchRecord.distance,
+        JobMatchRecord.status,
+        JobMatchRecord.duration_ms,
+        JobMatchRecord.matched_at,
+        ProfileSnapshot.serial_no.label("snapshot_serial_no"),
+        ProfileSnapshot.user_id.label("user_id"),
+        User.username.label("username"),
+        JobProfile.title.label("job_title"),
+    )
+
+
+def _to_match_record(row) -> AdminMatchRecordSummary:
+    return AdminMatchRecordSummary(
+        id=row.id,
+        profile_snapshot_id=row.profile_snapshot_id,
+        snapshot_serial_no=row.snapshot_serial_no,
+        user_id=row.user_id,
+        username=row.username,
+        job_profile_id=row.job_profile_id,
+        job_title=row.job_title,
+        rank=row.rank,
+        score=row.score,
+        distance=row.distance,
+        status=row.status,
+        duration_ms=row.duration_ms,
+        matched_at=row.matched_at,
+    )
+
+
+@router.get("/records/stats", response_model=AdminMatchRecordStats)
+async def match_record_stats(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """匹配明细总览（页面头部展示；不随筛选变化）。"""
+    row = (
+        await db.execute(
+            select(
+                func.count().label("total"),
+                func.count().filter(JobMatchRecord.status == "success").label("success"),
+                func.count().filter(JobMatchRecord.status == "failed").label("failed"),
+                func.count(func.distinct(JobMatchRecord.profile_snapshot_id)).label("snapshots"),
+                func.avg(JobMatchRecord.score).label("avg_score"),
+                func.avg(JobMatchRecord.duration_ms).label("avg_duration_ms"),
+            ).select_from(JobMatchRecord)
+        )
+    ).one()
+
+    return AdminMatchRecordStats(
+        total=row.total or 0,
+        success=row.success or 0,
+        failed=row.failed or 0,
+        snapshots=row.snapshots or 0,
+        avg_score=round(float(row.avg_score), 4) if row.avg_score is not None else None,
+        avg_duration_ms=round(float(row.avg_duration_ms), 1) if row.avg_duration_ms is not None else None,
+    )
+
+
+@router.get("/records", response_model=AdminMatchRecordListResponse)
+async def list_match_records(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    snapshot_id: int | None = Query(None, description="按快照筛选（快照页的「明细」入口用它）"),
+    user_id: int | None = None,
+    job_profile_id: int | None = None,
+    status_filter: str | None = Query(None, alias="status", pattern="^(success|failed)$"),
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """匹配明细列表（含岗位标题、快照序列号、用户名）。"""
+    conditions = []
+    if snapshot_id is not None:
+        conditions.append(JobMatchRecord.profile_snapshot_id == snapshot_id)
+    if user_id is not None:
+        conditions.append(ProfileSnapshot.user_id == user_id)
+    if job_profile_id is not None:
+        conditions.append(JobMatchRecord.job_profile_id == job_profile_id)
+    if status_filter is not None:
+        conditions.append(JobMatchRecord.status == status_filter)
+
+    base = (
+        select(*_match_record_columns())
+        .select_from(JobMatchRecord)
+        .outerjoin(ProfileSnapshot, ProfileSnapshot.id == JobMatchRecord.profile_snapshot_id)
+        .outerjoin(User, User.id == ProfileSnapshot.user_id)
+        .outerjoin(JobProfile, JobProfile.id == JobMatchRecord.job_profile_id)
+    )
+    count_query = select(func.count()).select_from(JobMatchRecord)
+    if snapshot_id is not None:
+        count_query = count_query.where(JobMatchRecord.profile_snapshot_id == snapshot_id)
+    if job_profile_id is not None:
+        count_query = count_query.where(JobMatchRecord.job_profile_id == job_profile_id)
+    if status_filter is not None:
+        count_query = count_query.where(JobMatchRecord.status == status_filter)
+    if user_id is not None:
+        count_query = (
+            count_query.select_from(JobMatchRecord)
+            .join(ProfileSnapshot, ProfileSnapshot.id == JobMatchRecord.profile_snapshot_id)
+            .where(ProfileSnapshot.user_id == user_id)
+        )
+
+    for condition in conditions:
+        base = base.where(condition)
+
+    total = (await db.execute(count_query)).scalar() or 0
+    rows = (
+        await db.execute(
+            base.order_by(JobMatchRecord.matched_at.desc(), JobMatchRecord.rank.asc())
+            .offset(skip)
+            .limit(limit)
+        )
+    ).all()
+
+    return AdminMatchRecordListResponse(
+        total=total, items=[_to_match_record(r) for r in rows]
+    )
+
+
+@router.get("/records/{record_id}", response_model=AdminMatchRecordDetail)
+async def get_match_record(
+    record_id: int,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """匹配明细详情（含完整 analysis：向量相似度 / 六维对比 / 权重）。"""
+    row = (
+        await db.execute(
+            select(
+                *_match_record_columns(),
+                JobMatchRecord.analysis,
+                JobProfile.industry.label("job_industry"),
+            )
+            .select_from(JobMatchRecord)
+            .outerjoin(ProfileSnapshot, ProfileSnapshot.id == JobMatchRecord.profile_snapshot_id)
+            .outerjoin(User, User.id == ProfileSnapshot.user_id)
+            .outerjoin(JobProfile, JobProfile.id == JobMatchRecord.job_profile_id)
+            .where(JobMatchRecord.id == record_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="匹配明细不存在")
+
+    summary = _to_match_record(row)
+    return AdminMatchRecordDetail(
+        **summary.model_dump(),
+        analysis=row.analysis,
+        job_industry=row.job_industry,
+    )
 
 
 def _report_count_expr():
