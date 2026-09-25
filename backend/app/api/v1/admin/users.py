@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
+from app.core.roles import USER_ROLE_ADMIN, UserRole
 from app.domain.models.profile_snapshot import ProfileSnapshot
-from app.domain.models.report import ChatSession
+from app.domain.models.report import ChatMessage, ChatSession
 from app.domain.models.report_record import ReportRecord
 from app.domain.models.resume import Resume
+from app.domain.models.student_profile import StudentProfile
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
 from app.infrastructure.security import hash_password
@@ -19,6 +23,8 @@ from app.schemas.admin import (
     AdminUserUpdate,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
@@ -26,13 +32,19 @@ router = APIRouter()
 async def list_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
-    role: str | None = None,
+    role: UserRole | None = Query(None, description="按角色筛选（白名单外 422）"),
     status: int | None = Query(None, ge=0, le=1),
     keyword: str | None = None,
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List users with optional filtering."""
+    """List users with optional filtering.
+
+    B2-4 改造：
+    - `role` 收白名单（`UserRole`）→ 非法角色 422，不再静默返回空列表；
+    - `keyword` 除用户名/邮箱外，同时匹配手机号/QQ/微信（B2-4 的字段要能查得到，
+      否则建了列也只能一页页翻）。
+    """
     query = select(User)
     count_query = select(func.count()).select_from(User)
 
@@ -44,8 +56,15 @@ async def list_users(
         count_query = count_query.where(User.status == status)
     if keyword:
         like = f"%{keyword}%"
-        query = query.where((User.username.like(like)) | (User.email.like(like)))
-        count_query = count_query.where((User.username.like(like)) | (User.email.like(like)))
+        keyword_filter = or_(
+            User.username.like(like),
+            User.email.like(like),
+            User.phone.like(like),
+            User.qq.like(like),
+            User.wechat.like(like),
+        )
+        query = query.where(keyword_filter)
+        count_query = count_query.where(keyword_filter)
 
     total = (await db.execute(count_query)).scalar() or 0
 
@@ -78,7 +97,11 @@ async def get_user_stats(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get usage statistics for a specific user."""
+    """Get usage statistics for a specific user.
+
+    B2-4 补 `snapshot_count` / `profile_count`：删除用户时数据库会 CASCADE 掉画像快照与
+    画像，管理端确认框需要如实列出"还会删掉什么"。
+    """
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -108,6 +131,19 @@ async def get_user_stats(
         .where(ReportRecord.user_id == user_id)
     )).scalar() or 0
 
+    # B2-4：全部快照数（含未匹配）与画像数
+    snapshot_count = (await db.execute(
+        select(func.count())
+        .select_from(ProfileSnapshot)
+        .where(ProfileSnapshot.user_id == user_id)
+    )).scalar() or 0
+
+    profile_count = (await db.execute(
+        select(func.count())
+        .select_from(StudentProfile)
+        .where(StudentProfile.user_id == user_id)
+    )).scalar() or 0
+
     return AdminUserStats(
         user_id=user.id,
         username=user.username,
@@ -115,6 +151,8 @@ async def get_user_stats(
         match_count=match_count,
         report_count=report_count,
         chat_session_count=chat_session_count,
+        snapshot_count=snapshot_count,
+        profile_count=profile_count,
     )
 
 
@@ -125,15 +163,28 @@ async def update_user(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a user profile."""
+    """Update a user profile.
+
+    B2-4 自锁保护：管理员不能**禁用自己**、也不能**取消自己的管理员身份**——
+    否则一次误操作就可能把最后一个管理员锁在门外（只能改库救回来）。改别人不受限制。
+    """
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
     update_data = data.model_dump(exclude_unset=True)
 
-    if "password" in update_data and update_data["password"]:
-        update_data["password_hash"] = hash_password(update_data.pop("password"))
+    if user.id == current_user.id:
+        if update_data.get("status") == 0:
+            raise HTTPException(status_code=400, detail="不能禁用当前登录的管理员账号")
+        if "role" in update_data and update_data["role"] != USER_ROLE_ADMIN:
+            raise HTTPException(status_code=400, detail="不能取消当前登录账号的管理员身份")
+
+    if "password" in update_data:
+        # 显式传 null/空串 = 不改密码；只有真给了新密码才重算哈希
+        new_password = update_data.pop("password")
+        if new_password:
+            update_data["password_hash"] = hash_password(new_password)
 
     for field, value in update_data.items():
         setattr(user, field, value)
@@ -167,10 +218,30 @@ async def delete_user(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a user."""
+    """Delete a user **and their dependent data**.
+
+    B2-4 修复的真 bug：原先这里只 `db.delete(user)` 一次，而 `chat_sessions`、`resumes`
+    两个外键是 `NO ACTION`（`chat_messages.session_id` 同样是 `NO ACTION`）→ 只要该用户
+    有过对话或上传过简历，删除就抛 ForeignKeyViolation，接口 500（实测 1520 个用户里
+    11 个删不掉，管理端 UI 上就是"点了删除没反应/报错"）。
+
+    现在按外键依赖顺序在**同一事务**内先删子行、再删用户：
+    `chat_messages`（经 session 子查询）→ `chat_sessions` → `resumes` → `users`。
+    其余关联表（`profile_snapshots` / `report_records` / `student_profiles`）由数据库
+    的 `ON DELETE CASCADE` 负责，无需在此重复删除。
+    """
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="不能删除当前登录的账号")
 
+    session_ids = select(ChatSession.id).where(ChatSession.user_id == user_id)
+    await db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
+    await db.execute(delete(ChatSession).where(ChatSession.user_id == user_id))
+    await db.execute(delete(Resume).where(Resume.user_id == user_id))
+    # 最后删用户：数据库级联带走 profile_snapshots / report_records / student_profiles
+    # （以及依赖快照的 job_match_records / report_records）
     await db.delete(user)
     await db.flush()
+    logger.info("admin %s deleted user %s (%s)", current_user.id, user_id, user.username)

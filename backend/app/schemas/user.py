@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, Field
 
+from app.core.roles import UserRole
+
 
 class UserRegister(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
@@ -35,7 +37,8 @@ class UserResponse(BaseModel):
 class UserUpdate(BaseModel):
     email: EmailStr | None = None
     phone: str | None = Field(None, max_length=20)
-    role: str | None = Field(None, pattern=r"^(student|admin)$")
+    # B2-4：改用角色白名单常量（此前是与 AdminUserUpdate 各自硬编码的正则，容易漂移）
+    role: UserRole | None = None
     status: int | None = Field(None, ge=0, le=1)
 
 

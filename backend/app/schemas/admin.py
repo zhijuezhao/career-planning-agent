@@ -2,7 +2,9 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.core.roles import UserRole
 
 # ── User Admin Schemas ──────────────────────────────────────────────────────
 
@@ -11,6 +13,9 @@ class AdminUserResponse(BaseModel):
     username: str
     email: str | None
     phone: str | None
+    # B2-4：联系方式（列由 B2-0 建好，此前 ORM/接口都没暴露 → 前端永远看不到也改不了）
+    qq: str | None = None
+    wechat: str | None = None
     role: str
     status: int
     created_at: datetime
@@ -20,11 +25,30 @@ class AdminUserResponse(BaseModel):
 
 
 class AdminUserUpdate(BaseModel):
-    email: str | None = None
+    """管理端可改的用户字段（B2-4 改造）。
+
+    - `role` 走 `UserRole` 白名单：非法角色 422，不再"静默写入谁都不认识的角色"；
+    - `qq` / `wechat` 为 B2-4 新增，`qq` 限数字（它本来就是号码）；
+    - **空串一律规范化为 `None`**：管理端把输入框清空 = 真清空（NULL），
+      而不是写一个 `''` 进库（`email` 是唯一列，多个 `''` 会互相冲突）。
+    """
+
+    email: str | None = Field(None, max_length=100)
     phone: str | None = Field(None, max_length=20)
-    role: str | None = Field(None, pattern=r"^(student|admin)$")
+    qq: str | None = Field(None, max_length=20, pattern=r"^\d{5,20}$")
+    wechat: str | None = Field(None, max_length=50)
+    role: UserRole | None = None
     status: int | None = Field(None, ge=0, le=1)
     password: str | None = Field(None, min_length=6, max_length=128)
+
+    @field_validator("email", "phone", "qq", "wechat", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: object) -> object:
+        """`""` / 纯空白 → `None`（清空语义）；同时去掉首尾空白。"""
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
 
 
 class AdminUserListResponse(BaseModel):
@@ -39,6 +63,9 @@ class AdminUserStats(BaseModel):
     match_count: int = 0
     report_count: int = 0
     chat_session_count: int = 0
+    # B2-4：删除用户前要如实告诉管理员"还会连带删掉哪些东西"（快照/画像由数据库 CASCADE）
+    snapshot_count: int = 0
+    profile_count: int = 0
 
 
 # ── JobProfile Admin Schemas ────────────────────────────────────────────────
