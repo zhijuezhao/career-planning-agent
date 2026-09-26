@@ -148,6 +148,13 @@ def _apply_stage(job: DataImportJob, node: str, state: dict) -> None:
             state.get("quality_results") or [],
         )
 
+    if node == "load_data":
+        # A/B 层（2026-09-26）：把"这张表是什么体裁、有哪些字段"写进 stats，
+        # 前端导入详情可见 —— 判 D 太多时管理员能立刻看出是体裁/列名问题。
+        schema = state.get("schema_profile") or {}
+        if schema:
+            job.stats = {**(job.stats or {}), "schema": schema}
+
     if node == "persist":
         # B2-2：落库统计可见（前端导入详情可直接展示"入库 N 条 / 新建 vs 更新"）
         persist_stats = state.get("persist_stats") or {}

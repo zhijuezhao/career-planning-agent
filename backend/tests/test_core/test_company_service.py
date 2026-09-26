@@ -188,6 +188,39 @@ class TestUpsertJobProfile:
 
 
 class TestPersistImportRows:
+    async def test_rejected_rows_are_archived_as_raw_only(self):
+        """C 层：质检 D 级行**也落 `job_raw_data`**（`import:rejected` / `is_active=False`），
+        但不生成画像 —— 目的是"不丢数据"，以后可离线重加工而不必重新上传。
+
+        背景：2026-09-26 实测 84 条里 81 条被判 D，此前在库里**毫无痕迹**。
+        """
+        rejected = [{"title": _title("被拒1"), "requirements": "核心技能：Java、Spring"}]
+
+        async with test_session_factory() as session:
+            stats = await persist_import_rows(session, [], rejected_rows=rejected)
+            await session.commit()
+            assert stats["raw_written"] == 0
+            assert stats["raw_written_rejected"] == 1
+            assert stats["profiles_new"] == 0
+            assert stats["failed"] == 0
+
+        async with test_session_factory() as session:
+            raw = (
+                await session.execute(
+                    select(JobRawData).where(JobRawData.title == _title("被拒1"))
+                )
+            ).scalar_one()
+            assert raw.source == "import:rejected"
+            assert raw.is_active is False
+            assert "Java" in (raw.requirements or "")
+
+            profile = (
+                await session.execute(
+                    select(JobProfile).where(JobProfile.title == _title("被拒1"))
+                )
+            ).scalar_one_or_none()
+            assert profile is None  # D 级不生成画像
+
     async def test_stats_and_per_row_tolerance(self):
         rows = [
             {"title": _title("批量1"), "company": _company("批量公司"), "city": "北京"},

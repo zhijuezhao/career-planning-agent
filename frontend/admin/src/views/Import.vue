@@ -23,8 +23,40 @@ interface ImportJob {
   success_count: number
   error_count: number
   errors: string[] | null
+  /** 落库统计（persist）与表结构检测（schema）——见后端 `_import_runner._apply_stage` */
+  stats: ImportStats | null
   created_at: string
   updated_at: string
+}
+
+/** 表结构检测结果（`schema_detect.SchemaProfile`） */
+interface ImportSchema {
+  genre?: string
+  fields?: string[]
+  has_recruiting_fields?: boolean
+  has_career_markers?: boolean
+}
+
+/** 落库统计（`job_persist_service.persist_import_rows`） */
+interface ImportPersistStats {
+  raw_written?: number
+  raw_written_rejected?: number
+  profiles_new?: number
+  profiles_updated?: number
+  failed?: number
+}
+
+interface ImportStats {
+  schema?: ImportSchema
+  persist?: ImportPersistStats
+}
+
+/** 体裁 → 中文（与后端 schema_detect 的取值一致） */
+const GENRE_LABELS: Record<string, string> = {
+  job_posting: '招聘岗位表',
+  career_roadmap: '职业发展路线表',
+  mixed: '混合表（既有招聘字段又有路线字段）',
+  unknown: '未识别体裁',
 }
 
 type TagType = 'success' | 'danger' | 'warning' | 'info'
@@ -164,6 +196,65 @@ const detailTags = computed<DetailTag[]>(() => {
 
 const detailMarkdown = computed(() => errorsToMarkdown(detailJob.value?.errors))
 
+// ── 统计预览卡（落库统计 + 表结构/体裁检测）────────────────────────────────
+// 「判 D 太多」时最需要看的就是体裁：职业发展路线表用招聘口径评分会被结构性判死。
+
+const statsVisible = ref(false)
+const statsJob = ref<ImportJob | null>(null)
+
+const openStats = (row: ImportJob) => {
+  statsJob.value = row
+  statsVisible.value = true
+}
+
+const statsTags = computed<DetailTag[]>(() => {
+  const job = statsJob.value
+  if (!job) return []
+  const persist = job.stats?.persist ?? {}
+  const genre = job.stats?.schema?.genre
+  const tags: DetailTag[] = []
+  if (genre) tags.push({ text: GENRE_LABELS[genre] ?? genre, type: 'info' })
+  tags.push({ text: `入库 ${persist.raw_written ?? 0} 行`, type: 'success' })
+  tags.push({ text: `新建 ${persist.profiles_new ?? 0}`, type: 'info' })
+  tags.push({ text: `更新 ${persist.profiles_updated ?? 0}`, type: 'info' })
+  if ((persist.raw_written_rejected ?? 0) > 0) {
+    tags.push({ text: `D 级归档 ${persist.raw_written_rejected} 行`, type: 'warning' })
+  }
+  if ((persist.failed ?? 0) > 0) {
+    tags.push({ text: `失败 ${persist.failed} 行`, type: 'danger' })
+  }
+  return tags
+})
+
+const statsMarkdown = computed(() => {
+  const stats = statsJob.value?.stats
+  if (!stats) return ''
+  const lines: string[] = []
+  const schema = stats.schema
+  if (schema?.genre) {
+    lines.push(`**表体裁**：${GENRE_LABELS[schema.genre] ?? schema.genre}（\`${schema.genre}\`）`)
+    if (schema.has_career_markers) {
+      lines.push('- 检测到职业路线特征列（技能/证书/晋升/换岗）→ 按**自适应口径**评分')
+    }
+    if (schema.has_recruiting_fields) {
+      lines.push('- 检测到招聘字段（公司/城市/薪资）')
+    }
+    if (schema.fields?.length) {
+      lines.push(`- 归一化后字段：\`${schema.fields.join('`, `')}\``)
+    }
+  }
+  const persist = stats.persist
+  if (persist) {
+    lines.push(
+      '',
+      `**落库**：入库 ${persist.raw_written ?? 0} 行` +
+        `（新建 ${persist.profiles_new ?? 0} / 更新 ${persist.profiles_updated ?? 0}），` +
+        `D 级原始行归档 ${persist.raw_written_rejected ?? 0} 行，失败 ${persist.failed ?? 0} 行`,
+    )
+  }
+  return lines.join('\n')
+})
+
 onMounted(fetchData)
 onBeforeUnmount(stopProgressPolling)
 </script>
@@ -226,8 +317,17 @@ onBeforeUnmount(stopProgressPolling)
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100" fixed="right">
+        <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
+            <el-button
+              type="primary"
+              size="small"
+              link
+              :disabled="!row.stats"
+              @click="openStats(row)"
+            >
+              统计
+            </el-button>
             <el-button
               type="primary"
               size="small"
@@ -259,6 +359,17 @@ onBeforeUnmount(stopProgressPolling)
       :json="detailJob?.errors ?? []"
       json-label="errors JSON"
       empty-text="（无失败原因）"
+    />
+
+    <DetailDialog
+      v-model="statsVisible"
+      title="导入统计"
+      :subtitle="statsJob ? `${statsJob.file_name} · 任务 #${statsJob.id}` : ''"
+      :tags="statsTags"
+      :markdown="statsMarkdown"
+      :json="statsJob?.stats ?? {}"
+      json-label="stats JSON"
+      empty-text="（本次导入无统计信息）"
     />
   </div>
 </template>

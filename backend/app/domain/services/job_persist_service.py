@@ -134,14 +134,25 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
     return profile, created
 
 
-async def persist_import_rows(session: AsyncSession, rows: list[dict], *, source: str = "import") -> dict:
+async def persist_import_rows(
+    session: AsyncSession,
+    rows: list[dict],
+    *,
+    rejected_rows: list[dict] | None = None,
+    source: str = "import",
+) -> dict:
     """批量落库导入行：每行 job_raw_data + job_profiles(+companies)。
 
     **单行失败不影响其他行**（用 SAVEPOINT 包住每一行）：导入是批量场景，
     一行脏数据不该让整单退回。返回统计，可直接写进 `data_import_jobs.stats`。
+
+    `rejected_rows`（质检 D 级）：只写 `job_raw_data`，标记 `source="import:rejected"`、
+    `is_active=False`，**不生成画像** —— 目的是"不丢数据"，以后可离线重加工，
+    不必让用户重新上传（2026-09-26 实测：84 条里 81 条被判 D，此前在库里毫无痕迹）。
     """
     stats: dict = {
         "raw_written": 0,
+        "raw_written_rejected": 0,
         "profiles_new": 0,
         "profiles_updated": 0,
         "failed": 0,
@@ -162,6 +173,21 @@ async def persist_import_rows(session: AsyncSession, rows: list[dict], *, source
                 title = row.get("title") or "未知岗位"
                 stats["errors"].append(f"{title}：{exc}"[:200])
             logger.warning("导入行落库失败 | title={!r} | error={}", row.get("title"), exc)
+
+    for row in rejected_rows or []:
+        try:
+            async with session.begin_nested():
+                await write_raw_job(
+                    session,
+                    {**row, "source": f"{source}:rejected", "is_active": False},
+                )
+            stats["raw_written_rejected"] += 1
+        except Exception as exc:  # noqa: BLE001 - 行级容错
+            stats["failed"] += 1
+            if len(stats["errors"]) < 5:
+                title = row.get("title") or "未知岗位"
+                stats["errors"].append(f"{title}（D级原始行）：{exc}"[:200])
+            logger.warning("D 级原始行落库失败 | title={!r} | error={}", row.get("title"), exc)
 
     return stats
 

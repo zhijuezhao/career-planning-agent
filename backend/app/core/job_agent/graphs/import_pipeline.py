@@ -21,6 +21,8 @@ class JobImportState(TypedDict, total=False):
 
     # Stage 1: Load
     raw_rows: list[dict]
+    #: 表结构检测结果（A/B 层）：体裁 + 字段集合，见 `schema_detect.normalize_rows`
+    schema_profile: dict
 
     # Stage 2: Clean
     cleaned_rows: list[dict]
@@ -80,6 +82,7 @@ async def node_load_data(state: JobImportState) -> dict:
     return {
         "raw_rows": raw_rows,
         "total_input": len(raw_rows),
+        "schema_profile": result.get("schema") or {},
         "status": "loaded",
     }
 
@@ -116,9 +119,12 @@ async def node_quality_judge(state: JobImportState) -> dict:
     rejected: list[dict] = []
     results: list[dict] = []
 
+    # 按体裁选评分口径（A/B 层）：职业发展路线表用自适应口径，否则会被结构性判 D
+    genre = str((state.get("schema_profile") or {}).get("genre") or "job_posting")
+
     for row in state["deduped_rows"]:
         job_data_str = json.dumps(row, ensure_ascii=False)
-        judge_result = await quality_judge.ainvoke({"job_data": job_data_str})
+        judge_result = await quality_judge.ainvoke({"job_data": job_data_str, "genre": genre})
         results.append(judge_result)
 
         if judge_result.get("grade") == "D":
@@ -127,8 +133,10 @@ async def node_quality_judge(state: JobImportState) -> dict:
             passed.append(row)
 
     logger.info(
-        "Import: quality judged | passed={} rejected={}",
-        len(passed), len(rejected),
+        "Import: quality judged | genre={} passed={} rejected={}",
+        genre,
+        len(passed),
+        len(rejected),
     )
     return {
         "quality_results": results,
@@ -228,28 +236,39 @@ async def node_persist(state: JobImportState) -> dict:
 
     单行失败只计入 `persist_stats.failed`，不影响整单（导入是批量场景）。
     原先 S7-3 只跑到 portrait 不落库，行级统计见 `data_import_jobs.stats.persist`。
+
+    **C 层（2026-09-26）**：被判 D 的行**也写入 `job_raw_data`**（`source=import:rejected`、
+    `is_active=False`），只是不生成画像 —— 此前 D 级行完全不落库，数据丢了只能重新上传。
     """
     from app.domain.services.job_persist_service import persist_import_rows
 
     rows = merge_rows_for_persist(state)
-    if not rows:
-        logger.info("Import: nothing to persist | passed=0")
+    rejected = [r for r in (state.get("rejected_rows") or []) if isinstance(r, dict)]
+    if not rows and not rejected:
+        logger.info("Import: nothing to persist | passed=0 rejected=0")
         return {
-            "persist_stats": {"raw_written": 0, "profiles_new": 0, "profiles_updated": 0, "failed": 0},
+            "persist_stats": {
+                "raw_written": 0,
+                "raw_written_rejected": 0,
+                "profiles_new": 0,
+                "profiles_updated": 0,
+                "failed": 0,
+            },
             "status": "completed",
         }
 
     async with async_session_factory() as session:
         try:
-            stats = await persist_import_rows(session, rows)
+            stats = await persist_import_rows(session, rows, rejected_rows=rejected)
             await session.commit()
         except Exception:
             await session.rollback()
             raise
 
     logger.info(
-        "Import: persisted | raw={} new={} updated={} failed={}",
+        "Import: persisted | raw={} rejected_raw={} new={} updated={} failed={}",
         stats["raw_written"],
+        stats.get("raw_written_rejected", 0),
         stats["profiles_new"],
         stats["profiles_updated"],
         stats["failed"],

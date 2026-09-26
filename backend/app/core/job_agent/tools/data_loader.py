@@ -7,6 +7,11 @@ import pandas as pd
 from langchain_core.tools import tool
 from loguru import logger
 
+from app.core.job_agent.tools.schema_detect import (
+    EXTRA_COLUMN_ALIASES,
+    normalize_rows,
+)
+
 DEFAULT_COLUMN_MAPPING: dict[str, str] = {
     "岗位名称": "title",
     "职位名称": "title",
@@ -128,12 +133,15 @@ async def load_excel_data(
                         field names. Merged over the default mapping.
 
     Returns:
-        Dict with keys: total (int), rows (list[dict]), columns (list[str]).
+        Dict with keys: total (int), rows (list[dict]), columns (list[str]),
+        schema (dict: 体裁与字段检测结果 —— 见 `schema_detect`).
         On failure: {"total": 0, "rows": [], "columns": [], "error": str}.
     """
     logger.info("Loading job data file | path={}", file_path)
 
+    # 基线映射（招聘体裁）+ 非招聘体裁的列别名（职业发展路线表等）
     merged_mapping = dict(DEFAULT_COLUMN_MAPPING)
+    merged_mapping.update(EXTRA_COLUMN_ALIASES)
     if column_mapping:
         merged_mapping.update(column_mapping)
 
@@ -156,5 +164,21 @@ async def load_excel_data(
         mapped = {col_mapping.get(k, k): v for k, v in row.items()}
         mapped_rows.append(mapped)
 
-    logger.info("Job data loaded | path={} | total={} | columns={}", file_path, len(mapped_rows), columns)
-    return {"total": len(mapped_rows), "rows": mapped_rows, "columns": columns}
+    # 归一化 + 体裁检测（A 层）：
+    # 把 `核心技能/所需证书/岗位晋升/换岗` 之类带标签并入 requirements/description，
+    # 并给出「这张表是招聘海报还是职业发展路线表」——质检据此选评分口径（B 层）。
+    normalized_rows, schema = normalize_rows(mapped_rows)
+
+    logger.info(
+        "Job data loaded | path={} | total={} | columns={} | schema={}",
+        file_path,
+        len(normalized_rows),
+        columns,
+        schema.as_dict(),
+    )
+    return {
+        "total": len(normalized_rows),
+        "rows": normalized_rows,
+        "columns": columns,
+        "schema": schema.as_dict(),
+    }

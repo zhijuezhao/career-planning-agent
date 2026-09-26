@@ -38,8 +38,62 @@ JOB_QUALITY_USER_TEMPLATE = """\
 """
 
 
-def build_quality_messages(job_data: str) -> list[dict[str, str]]:
+#: 自适应口径（career_roadmap / mixed / unknown 体裁使用）
+#:
+#: 背景（2026-09-26 实测）：原口径把「公司/城市/薪资/描述/任职要求」当作硬性完整度，
+#: 而用户的表是**职业发展路线表**（岗位名称/岗位晋升/换岗/所需证书/核心技能）→ 结构性上限 ≈50 分，
+#: 84 条里 81 条被判 D 丢弃。本口径改为**只按本表实际提供的字段评估**，不因表里没有的字段扣分。
+JOB_QUALITY_ADAPTIVE_SYSTEM_PROMPT = """\
+你是一个专业的岗位资料质量评估专家。你的任务是对给定的岗位资料做质量评估，并给出 A/B/C/D 四个等级。
+
+## 重要前提（必须遵守）
+1. **只按这份资料实际提供的字段评估**：它可能来自招聘海报，也可能是职业发展路线表/技能画像表。
+2. **表中没有的字段不计入分母、也不扣分** —— 例如表中没有“薪资”“公司”列时，绝不因此判低分。
+3. 只有当**表中本应提供的内容也含糊、空洞、无实质信息**时，才判低分。
+
+## 评估维度
+1. **信息完整性**（40%）：本表所含字段（岗位名称、技能、证书、晋升路径、换岗方向、职责、城市…）是否齐备
+2. **描述具体度**（35%）：内容是否具体、可操作（技能是否落到技术栈/工具，晋升是否给出具体职位）
+3. **要求明确度**（25%）：要求/技能/证书是否可衡量（版本、等级、认证全称等）
+
+## 等级标准
+- **A级（优秀）**：总分 ≥ 85，本表所含字段齐全且具体
+- **B级（良好）**：总分 ≥ 70，大部分字段齐全，少数偏简
+- **C级（一般）**：总分 ≥ 50，基本信息存在但偏简略
+- **D级（不合格）**：总分 < 50，**本表所含字段也**空洞、模糊、缺乏实质内容
+
+## 输出要求
+必须且仅输出一个合法 JSON 对象，格式如下：
+{
+  "grade": "A|B|C|D",
+  "score": "number(0-100)",
+  "breakdown": {
+    "信息完整性": "number(0-100)",
+    "描述具体度": "number(0-100)",
+    "要求明确度": "number(0-100)"
+  },
+  "strengths": ["string"],
+  "weaknesses": ["string"],
+  "summary": "string"
+}
+"""
+
+
+def build_quality_messages(
+    job_data: str, genre: str = "job_posting"
+) -> list[dict[str, str]]:
+    """按**体裁**选择评分口径。
+
+    - `job_posting`（表里有公司/城市/薪资、且无职业路线特征列）→ 原「招聘信息质量」口径；
+    - 其它（`career_roadmap` / `mixed` / `unknown`）→ 自适应口径：只按本表实际字段评估。
+      否则职业发展路线表会被结构性判 D（实测 84 条丢 81 条）。
+    """
+    system = (
+        JOB_QUALITY_SYSTEM_PROMPT
+        if genre == "job_posting"
+        else JOB_QUALITY_ADAPTIVE_SYSTEM_PROMPT
+    )
     return [
-        {"role": "system", "content": JOB_QUALITY_SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": JOB_QUALITY_USER_TEMPLATE.format(job_data=job_data)},
     ]

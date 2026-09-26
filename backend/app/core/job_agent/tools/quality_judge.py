@@ -33,7 +33,7 @@ _DEFAULT_QUALITY = {
 
 
 @tool
-async def quality_judge(job_data: str) -> dict:
+async def quality_judge(job_data: str, genre: str = "job_posting") -> dict:
     """Assess the quality of a job posting using LLM evaluation.
 
     Evaluates completeness, description quality, requirement clarity, and
@@ -47,16 +47,19 @@ async def quality_judge(job_data: str) -> dict:
 
     Args:
         job_data: JSON string of the cleaned job record.
+        genre: 表体裁（来自 `schema_detect`）。`job_posting` 用「招聘信息质量」口径；
+            其它（career_roadmap / mixed / unknown）用**自适应口径**：只按本表实际字段
+            评估、不因表里没有的字段扣分 —— 否则职业发展路线表会被结构性判 D。
 
     Returns:
         Dict with grade (str), score (int), breakdown (dict),
         strengths (list), weaknesses (list), and summary (str).
     """
-    logger.info("Quality judge tool | job_data_len={}", len(job_data))
+    logger.info("Quality judge tool | job_data_len={} | genre={}", len(job_data), genre)
 
     try:
         gateway = get_llm_gateway()
-        messages = build_quality_messages(job_data)
+        messages = build_quality_messages(job_data, genre=genre)
         # function_key：由管理端「系统配置 > 功能路由」绑定模型；未配置则回落默认模型
         response = await gateway.ainvoke(messages, function_key="job_quality")
         raw_content = response.content if isinstance(response.content, str) else str(response.content)
