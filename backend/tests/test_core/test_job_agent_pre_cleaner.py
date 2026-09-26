@@ -151,6 +151,34 @@ class TestCleanJobData:
         assert result["cleaned_rows"] == []
 
     @pytest.mark.asyncio
+    async def test_skips_rows_without_title(self):
+        """分组标题行（岗位名为空）必须被丢弃，不能进入后续 3 次 LLM（2026-09-26）。
+
+        用户表格用「测试类」「人工智能/算法类」这类标题行给岗位分区，这类行只有序号、
+        岗位名称为空；当成岗数据既白烧 token 又会生成垃圾画像。
+        实测 `job_infor.xlsx` 有 2 行这种标题行。
+        """
+        rows = [
+            {"title": "Java", "city": "北京"},
+            {"title": None, "序号": "20", "city": None},  # 分类标题行
+            {"title": "   ", "序号": "21"},  # 纯空白
+            {"title": "nan", "序号": "22"},  # 清洗前残留的 NaN 字符串
+            {"title": "Python", "city": None},
+        ]
+        result = await clean_job_data.ainvoke({"rows": rows})
+
+        assert result["total"] == 2
+        assert [r["title"] for r in result["cleaned_rows"]] == ["Java", "Python"]
+        assert result["stats"]["skipped_no_title"] == 3
+
+    @pytest.mark.asyncio
+    async def test_all_rows_without_title_yields_empty(self):
+        result = await clean_job_data.ainvoke({"rows": [{"title": ""}, {"title": "nan"}]})
+        assert result["total"] == 0
+        assert result["cleaned_rows"] == []
+        assert result["stats"]["skipped_no_title"] == 2
+
+    @pytest.mark.asyncio
     async def test_is_tool_instance(self):
         assert isinstance(clean_job_data, BaseTool)
         assert clean_job_data.name == "clean_job_data"

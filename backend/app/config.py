@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     # 太小会截断"多步查证"类问题，太大则可能反复调工具烧 token → 默认 12 步。
     chat_agent_recursion_limit: int = 12
 
+    # 单次导入行数上限（原 `_import_runner.IMPORT_MAX_ROWS` 硬编码 50）。
+    # 流水线每行 3 次 LLM（质检/提取/画像）→ 上限就是"误点一次最多烧多少额度"的闸门。
+    # env `IMPORT_MAX_ROWS` 可覆盖，默认 100。
+    import_max_rows: int = 100
+
     # Web search - Tavily
     tavily_api_key: str = ""
     tavily_base_url: str = "https://api.tavily.com"

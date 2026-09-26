@@ -18,14 +18,17 @@ from pathlib import Path
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.job_agent.graphs.import_pipeline import compile_import_pipeline
 from app.domain.models.import_job import DataImportJob
 from app.infrastructure.database import async_session_factory
 
 # D-S7-3=A：单次导入行数上限。流水线每行 3 次 LLM（质检/提取/画像），
-# 不设上限时误点一次就可能烧掉大量额度。S7-5 会提升为
-# ``app/config.py`` 的 ``settings.import_max_rows``（可被 ``IMPORT_MAX_ROWS`` 覆盖）。
-IMPORT_MAX_ROWS = 50
+# 不设上限时误点一次就可能烧掉大量额度。
+# 2026-09-26：由硬编码 50 提升为配置项 `settings.import_max_rows`
+# （env `IMPORT_MAX_ROWS` 可覆盖，默认 100）。此前注释写着"S7-5 会提升"但从未做，
+# 结果用户 86 行的文件**只被读前 50 行**，36 行从未进入流水线。
+IMPORT_MAX_ROWS = get_settings().import_max_rows
 
 # D-S7-5=A：阶段 → 进度百分比。前端既有契约是
 # ``progress_pct = processed_rows / total_rows``（子计划 §1.4 不改前端契约），

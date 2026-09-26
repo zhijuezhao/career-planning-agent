@@ -595,6 +595,17 @@ class TestImportS73StageProgress:
         assert expected is not None
         assert graph.payload["file_path"] == str(expected)
 
+    def test_row_cap_comes_from_settings(self):
+        """行数上限必须来自配置（2026-09-26）。
+
+        此前 `_import_runner.IMPORT_MAX_ROWS` 硬编码 50，注释说"S7-5 会提升为
+        `settings.import_max_rows`"但一直没做 → 用户 86 行的文件**只被读前 50 行**。
+        """
+        from app.config import get_settings
+
+        assert _import_runner.IMPORT_MAX_ROWS == get_settings().import_max_rows
+        assert _import_runner.IMPORT_MAX_ROWS >= 50  # 不再被硬编码卡在 50
+
     def test_every_stage_is_committed_before_next(self, admin_token, client, monkeypatch):
         """反「最后才写一次」：每个阶段结束时，进度都能被另一条连接读到。"""
         observed: list[dict] = []

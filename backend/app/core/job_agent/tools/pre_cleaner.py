@@ -249,6 +249,7 @@ async def clean_job_data(
         "industry_normalised": 0,
         "salary_normalised": 0,
         "salary_cleared": 0,  # 面议 → None
+        "skipped_no_title": 0,  # 分类标题行/缺岗位名 → 直接丢弃
     }
 
     text_fields = {"title", "company", "city", "industry", "description", "requirements", "salary"}
@@ -256,6 +257,16 @@ async def clean_job_data(
     cleaned_rows: list[dict] = []
     for row in rows:
         cleaned = dict(row)
+
+        # 丢弃没有岗位名称的行（2026-09-26）。
+        # 用户的表格常用分组标题行（如「测试类」「人工智能/算法类」）来分区，这类行只有
+        # 序号、岗位名称为空 —— 它们不是岗位数据，若继续走后面 3 次 LLM（质检/提取/画像）
+        # 既白烧 token，又会生成垃圾画像。实测 `job_infor.xlsx` 有 2 行这种标题行。
+        title = cleaned.get("title")
+        if not str(title or "").strip() or str(title).strip() in ("None", "nan"):
+            stats["skipped_no_title"] += 1
+            logger.debug("Skip row without title | row={}", str(row)[:120])
+            continue
 
         # HTML tag removal for all text fields
         for field in text_fields:
