@@ -5,7 +5,7 @@ from app.core.agent.base import BaseAgent, ReActAgent
 from app.core.agent.langgraph_agent import build_agent_graph, compile_agent
 from app.core.agent.nodes import AgentState, call_model, execute_tools, should_continue
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, tool
 from langgraph.graph.state import CompiledStateGraph
 
 # ── base.py tests ──────────────────────────────────────────────────────────
@@ -172,6 +172,59 @@ class TestNodes:
         result = await execute_tools(state, config={"configurable": {"tools_by_name": {}}})
 
         assert "not found" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_execute_tools_injects_runtime_identity(self):
+        """运行时身份注入：`user_id` / `profile_id` 模型不可能知道，必须由 configurable 补齐。
+
+        `profile_id` 与 `user_id` 是 **1:1 约定**（`snapshot_service` 里就写 `profile_id=user_id`）
+        → 不注入的话 `generate_career_report(user_id, profile_id, ...)` 一调就报错。
+        用真实 `@tool` 而不是 Mock：顺带验证 pydantic v2 的 `args_schema.model_fields` 读取路径。
+        """
+
+        @tool
+        async def _fake_report(
+            user_id: int, profile_id: int, target_job: str | None = None
+        ) -> str:
+            """Fake report tool for injection test."""
+            return f"{user_id}|{profile_id}|{target_job}"
+
+        state: AgentState = {
+            "messages": [
+                AIMessage(
+                    content="生成报告",
+                    tool_calls=[
+                        {
+                            "name": "_fake_report",
+                            "args": {"target_job": "前端开发"},
+                            "id": "call_3",
+                        }
+                    ],
+                )
+            ]
+        }
+
+        result = await execute_tools(
+            state,
+            config={
+                "configurable": {
+                    "tools_by_name": {"_fake_report": _fake_report},
+                    "user_id": 42,
+                }
+            },
+        )
+
+        # user_id 与 profile_id 都被注入；模型自己给的 target_job 不被覆盖
+        assert result["messages"][0].content == "42|42|前端开发"
+
+    @pytest.mark.asyncio
+    async def test_call_model_without_llm_raises_clear_error(self):
+        """config 没带 llm 时给**明确**错误（此前是 AttributeError: 'NoneType' ...）。"""
+        with pytest.raises(ValueError) as exc:
+            await call_model(
+                {"messages": [HumanMessage(content="你好")]}, config={"configurable": {}}
+            )
+        assert "configurable" in str(exc.value)
 
     def test_should_continue_returns_continue(self):
         assert should_continue({"next": "continue"}) == "continue"

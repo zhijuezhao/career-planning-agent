@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.auth import require_auth
+from app.config import get_settings
 from app.core.agent.langgraph_agent import compile_agent
-from app.core.agent.tools import AGENT_TOOLS
-from app.core.llm.gateway import get_llm_gateway
+from app.core.agent.nodes import AgentState
+from app.core.agent.tools import get_agent_tools
+from app.core.llm.gateway import LLMGatewayError, get_llm_gateway
+from app.core.safety.filter import append_disclaimer, check_content
 from app.domain.models.user import User
 from app.domain.services.chat_service import (
     create_chat_session,
@@ -46,7 +50,14 @@ _CAREER_SYSTEM_PROMPT = """你是一名专业的大学生职业规划助手。�
 - 如果涉及具体岗位要求，引用可靠来源
 - 对于不确定的信息，明确说明
 - 语言简洁明了，适合大学生理解
-- 当用户询问岗位匹配、职业路线或报告生成时，主动使用相应工具"""
+- 当用户询问岗位匹配、职业路线或报告生成时，主动使用相应工具
+- **需要事实（岗位要求、知识库内容、报告数据）时先调用工具再回答**，不要只凭记忆作答
+- 工具返回的是真实数据：要转述其中关键信息（岗位/公司/评分/结论），不要只说"我查到了\""""
+
+
+def _sse(payload: dict[str, Any]) -> str:
+    """统一的 SSE 事件编码（前端按 `data: ` 逐行解析）。"""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 @router.post("/sessions", response_model=ChatSessionResponse, status_code=status.HTTP_201_CREATED)
@@ -115,10 +126,18 @@ async def api_send_message(
 ):
     """Send a message and stream the AI response via SSE.
 
-    Returns a Server-Sent Events stream with events:
-    - ``{"type": "token", "content": "..."}`` — each token chunk.
-    - ``{"type": "done", "session_id": "...", "message_id": N}`` — stream complete.
-    - ``{"type": "error", "content": "..."}`` — error occurred.
+    SSE 事件契约：
+    - ``{"type": "token", "content": "..."}`` — 文本增量（含最后追加的免责声明）
+    - ``{"type": "tool", "phase": "start"|"end", "name": "..."}`` — **模型正在调用工具**
+      （前端 switch 没有 default 分支 → 老版本前端会安全忽略它）
+    - ``{"type": "done", "session_id": "...", "message_id": N}`` — 结束
+    - ``{"type": "error", "content": "..."}`` — 出错
+
+    执行链（2026-09-25 修复"agent 链失效"）：
+    ① 输入侧内容安全（确定性规则，命中即拒答、不调模型）；
+    ② ReAct agent：模型**自主决定**是否/如何调用工具（依赖经 ``configurable`` 逐次传入，
+       见 `app/core/agent/nodes.py` 顶部说明）；
+    ③ 输出侧合规：追加免责声明（幂等），命中违规规则时额外提示并记 warning。
     """
     chat_session = await get_chat_session(db, session_id, current_user.id)
     if chat_session is None:
@@ -129,78 +148,137 @@ async def api_send_message(
     await db.commit()
 
     gateway = get_llm_gateway()
-    llm = gateway.get_model()
-    llm_with_tools = llm.bind_tools(AGENT_TOOLS)
+    settings_obj = get_settings()
 
     async def event_stream():
         assistant_content = ""
         message_id: int | None = None
 
-        try:
-            # Build message list: system prompt + history + current user message
-            messages_for_llm = [SystemMessage(content=_CAREER_SYSTEM_PROMPT)]
-
-            history = await get_chat_messages(db, session_id)
-            for msg in history:
-                if msg.role == "user":
-                    messages_for_llm.append(HumanMessage(content=msg.content))
-                elif msg.role == "assistant":
-                    from langchain_core.messages import AIMessage
-
-                    messages_for_llm.append(AIMessage(content=msg.content))
-
-            # Create tools lookup dict with db session injected
-            tools_by_name = {}
-            for tool in AGENT_TOOLS:
-                tools_by_name[tool.name] = tool
-
-            # Use LangGraph Agent with streaming
-            from app.core.agent.nodes import AgentState
-
-            initial_state: AgentState = {
-                "messages": messages_for_llm,
-                "next": "tools",
-            }
-
-            agent = compile_agent(llm_with_tools, AGENT_TOOLS)
-
-            async for event in agent.astream_events(initial_state, version="v2"):
-                kind = event.get("kind", "")
-
-                # Handle chat model stream events (token chunks)
-                if kind == "on_chat_model_stream":
-                    chunk = event.get("data", {}).get("chunk", {})
-                    content = chunk.get("content", "") if isinstance(chunk, dict) else ""
-                    if not content and hasattr(chunk, "content"):
-                        content = chunk.content
-                    if content:
-                        assistant_content += content
-                        yield f"data: {json.dumps({'type': 'token', 'content': content}, ensure_ascii=False)}\n\n"
-
-                # Handle tool execution events
-                elif kind == "on_tool_end":
-                    tool_name = event.get("name", "unknown")
-                    logger.info("Agent tool executed | tool={}", tool_name)
-
-            # Save assistant message
+        async def save_assistant() -> str:
+            """落库助手消息并返回 done 事件（流式结束后才有完整内容）。"""
+            nonlocal message_id
             assistant_msg = await save_chat_message(
-                db, session_id, "assistant", assistant_content,
-                tokens_used=0, model_used=gateway.current_model,
+                db,
+                session_id,
+                "assistant",
+                assistant_content,
+                tokens_used=0,
+                model_used=gateway.current_model,
             )
             message_id = assistant_msg.id
             await db.commit()
+            return _sse(
+                {"type": "done", "session_id": str(session_id), "message_id": message_id}
+            )
 
-            done_data = {
-                "type": "done",
-                "session_id": str(session_id),
-                "message_id": message_id,
-            }
-            yield f"data: {json.dumps(done_data, ensure_ascii=False)}\n\n"
+        try:
+            # ── ① 输入侧内容安全：命中即拒答（不把违规诉求喂给模型）──────────────
+            safety = check_content(data.content)
+            if not safety.is_safe:
+                assistant_content = (
+                    f"抱歉，你提到的内容涉及「{safety.reason}」，我不能据此提供建议。"
+                    "职业建议应当基于岗位要求与个人能力本身，而不是性别、地域、婚育等限制条件。"
+                    "你可以把岗位要求原文发给我，我帮你分析需要补哪些能力。"
+                )
+                logger.info(
+                    "Chat 输入命中安全规则，直接拒答 | session_id={} | type={}",
+                    session_id,
+                    safety.violation_type,
+                )
+                yield _sse({"type": "token", "content": assistant_content})
+            else:
+                # ── ② ReAct agent：模型自主决策调用哪些工具 ────────────────────
+                tools = get_agent_tools()
+                llm_with_tools = gateway.get_model().bind_tools(tools)
+                agent = compile_agent(llm_with_tools, tools)
 
-        except Exception as exc:
+                config: dict[str, Any] = {
+                    "configurable": {
+                        "llm": llm_with_tools,
+                        "tools_by_name": {t.name: t for t in tools},
+                        # 工具需要的运行时身份（模型不可能自己知道）
+                        "user_id": current_user.id,
+                        "db": db,
+                    },
+                    # 步数上限：防 ReAct 反复调工具烧 token
+                    "recursion_limit": settings_obj.chat_agent_recursion_limit,
+                }
+
+                messages_for_llm: list[BaseMessage] = [SystemMessage(content=_CAREER_SYSTEM_PROMPT)]
+                for msg in await get_chat_messages(db, session_id):
+                    if msg.role == "user":
+                        messages_for_llm.append(HumanMessage(content=msg.content))
+                    elif msg.role == "assistant":
+                        messages_for_llm.append(AIMessage(content=msg.content))
+
+                initial_state: AgentState = {"messages": messages_for_llm, "next": "tools"}
+
+                async for event in agent.astream_events(
+                    initial_state, config=config, version="v2"
+                ):
+                    # ⚠️ LangChain `astream_events` 的事件字典用 **`event`** 键表示事件名
+                    # （键集合：data/event/metadata/name/parent_ids/run_id/tags）。
+                    # 历史实现读的是 `kind` —— 该键根本不存在 → 所有事件都被当成 ""，
+                    # token 与 tool 全被丢弃（线上表现：回答里只剩追加的免责声明）。
+                    kind = event.get("event", "")
+
+                    if kind == "on_chat_model_stream":
+                        chunk = event.get("data", {}).get("chunk", {})
+                        content = chunk.get("content", "") if isinstance(chunk, dict) else ""
+                        if not content and hasattr(chunk, "content"):
+                            content = chunk.content
+                        if content:
+                            assistant_content += content
+                            yield _sse({"type": "token", "content": content})
+
+                    elif kind in ("on_tool_start", "on_tool_end"):
+                        tool_name = event.get("name", "unknown")
+                        phase = "start" if kind == "on_tool_start" else "end"
+                        logger.info(
+                            "Agent tool {} | tool={} | session_id={}",
+                            phase,
+                            tool_name,
+                            session_id,
+                        )
+                        yield _sse({"type": "tool", "phase": phase, "name": tool_name})
+
+            # ── ③ 输出侧合规：统一追加免责声明（幂等）──────────────────────────
+            output_safety = check_content(assistant_content)
+            if not output_safety.is_safe:
+                logger.warning(
+                    "Chat 输出命中安全规则 | session_id={} | type={} | matched={!r}",
+                    session_id,
+                    output_safety.violation_type,
+                    output_safety.matched_text,
+                )
+
+            tail = append_disclaimer(assistant_content)
+            if not output_safety.is_safe:
+                tail += (
+                    f"\n\n> 提示：上文中「{output_safety.matched_text}」这类表述存在合规风险，"
+                    "请以岗位实际要求为准。"
+                )
+            suffix = tail[len(assistant_content):]
+            if suffix:
+                assistant_content = tail
+                yield _sse({"type": "token", "content": suffix})
+
+            yield await save_assistant()
+
+        except LLMGatewayError as exc:
+            # ② 之后"没有默认模型"是常见配置态：给学生一句能懂的提示，细节留给日志
             await db.rollback()
-            logger.error("Chat SSE error | session_id={} | error={}", session_id, exc)
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)}, ensure_ascii=False)}\n\n"
+            logger.error("Chat LLM 网关不可用 | session_id={} | error={}", session_id, exc)
+            yield _sse(
+                {
+                    "type": "error",
+                    "content": "AI 服务暂不可用（管理员尚未绑定默认模型），请稍后再试",
+                }
+            )
+        except Exception:
+            await db.rollback()
+            logger.exception("Chat SSE error | session_id={}", session_id)
+            yield _sse({"type": "error", "content": "服务暂时不可用，请稍后重试"})
 
     return StreamingResponse(
         event_stream(),

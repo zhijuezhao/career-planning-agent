@@ -36,6 +36,21 @@ const listLoading = ref(false)
 const messageContainerRef = ref<HTMLElement | null>(null)
 let abortController: AbortController | null = null
 
+/** 模型调用工具时的进度提示（由后端 agent 的 `tool` SSE 事件驱动） */
+const toolActivity = ref<string | null>(null)
+
+/**
+ * 工具名 → 用户可读文案。**新增工具时在这里补一条**
+ * （后端工具清单见 `backend/app/core/agent/tools/`）。
+ */
+const TOOL_LABELS: Record<string, string> = {
+  career_knowledge_search: '检索职业知识库',
+  content_safety_check: '内容合规检查',
+  web_search: '联网搜索资料',
+  generate_career_report: '生成职业报告',
+}
+const toolLabel = (name: string): string => TOOL_LABELS[name] ?? `调用工具 ${name}`
+
 const currentSessionTitle = computed(() => {
   const session = sessions.value.find(s => s.id === activeSessionId.value)
   return session?.title || '新对话'
@@ -133,18 +148,26 @@ function handleSend(): void {
   scrollToBottom()
 
   isStreaming.value = true
+  toolActivity.value = null
   abortController = sendMessage(activeSessionId.value, content, {
     onToken: (text) => {
       aiMsg.content += text
       scrollToBottom()
     },
+    onTool: (info) => {
+      // start = 正在调用（显示提示）；end = 调用结束（清掉，等模型继续作答）
+      toolActivity.value = info.phase === 'start' ? toolLabel(info.name) : null
+      scrollToBottom()
+    },
     onDone: () => {
       isStreaming.value = false
+      toolActivity.value = null
       abortController = null
       void loadSessions()
     },
     onError: (error) => {
       isStreaming.value = false
+      toolActivity.value = null
       abortController = null
       aiMsg.content = `抱歉，发生了错误：${error}`
       ElMessage.error('消息发送失败')
@@ -157,6 +180,7 @@ function handleStop(): void {
     abortController.abort()
     abortController = null
     isStreaming.value = false
+    toolActivity.value = null
   }
 }
 
@@ -224,6 +248,11 @@ onBeforeUnmount(() => { abortController?.abort() })
             :streaming="msg.role === 'assistant' && isStreaming && msg === messages[messages.length - 1]"
           />
         </template>
+
+        <div v-if="toolActivity" class="tool-activity">
+          <span class="tool-dot" />
+          {{ toolActivity }}…
+        </div>
       </div>
 
       <div class="input-area">
@@ -296,6 +325,35 @@ onBeforeUnmount(() => { abortController?.abort() })
   justify-content: center;
   min-height: 400px;
   text-align: center;
+}
+.tool-activity {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--c-brand-lighter);
+  color: var(--c-brand);
+  font-size: var(--text-sm);
+}
+.tool-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-brand);
+  animation: tool-pulse 1s ease-in-out infinite;
+}
+@keyframes tool-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
 }
 .welcome-icon {
   font-size: 48px;

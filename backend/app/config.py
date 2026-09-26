@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     resume_max_text_chars: int = 15000
     resume_llm_model: str | None = None
 
+    # Chat agent（ReAct 循环）
+    # 步数上限：LangGraph 的 recursion_limit。ReAct 每轮 = 模型调用 + 工具执行，
+    # 太小会截断"多步查证"类问题，太大则可能反复调工具烧 token → 默认 12 步。
+    chat_agent_recursion_limit: int = 12
+
     # Web search - Tavily
     tavily_api_key: str = ""
     tavily_base_url: str = "https://api.tavily.com"

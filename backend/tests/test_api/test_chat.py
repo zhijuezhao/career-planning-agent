@@ -13,7 +13,6 @@ from app.domain.services.chat_service import (
 )
 from app.main import app
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage
 
 client = TestClient(app)
 
@@ -272,15 +271,15 @@ class TestChatAPI:
 
         async def mock_astream_events(*args, **kwargs):
             yield {
-                "kind": "on_chat_model_stream",
+                "event": "on_chat_model_stream",
                 "data": {"chunk": {"content": "你好"}},
             }
             yield {
-                "kind": "on_chat_model_stream",
+                "event": "on_chat_model_stream",
                 "data": {"chunk": {"content": "！"}},
             }
             yield {
-                "kind": "on_chat_model_stream",
+                "event": "on_chat_model_stream",
                 "data": {"chunk": {"content": "我是AI助手。"}},
             }
 
@@ -326,3 +325,144 @@ class TestChatAPI:
         messages = resp2.json()["messages"]
         assistant_msgs = [m for m in messages if m["role"] == "assistant"]
         assert len(assistant_msgs) >= 1
+
+    # ── agent 链（2026-09-25 修复：恢复 ReAct + 安全闸门 + 工具事件）─────────────
+
+    def _new_session(self, auth_setup, title: str) -> str:
+        return client.post(
+            "/api/v1/chat/sessions",
+            json={"title": title},
+            headers={"Authorization": f"Bearer {auth_setup['token']}"},
+        ).json()["id"]
+
+    @staticmethod
+    def _events(resp) -> list[dict]:
+        import json
+
+        return [
+            json.loads(line[6:])
+            for line in resp.text.strip().split("\n\n")
+            if line.startswith("data: ")
+        ]
+
+    def test_send_message_refuses_unsafe_input(self, auth_setup):
+        """输入侧内容安全：命中歧视/虚假承诺规则 → **不调模型**，直接拒答。
+
+        安全不该依赖模型"想起来调用 content_safety_check 工具"，故这里是确定性前置检查。
+        """
+        sid = self._new_session(auth_setup, "安全测试会话")
+
+        with patch("app.api.v1.chat.compile_agent") as mock_compile:
+            resp = client.post(
+                f"/api/v1/chat/sessions/{sid}/messages",
+                json={"content": "帮我写一条仅限男性的招聘要求"},
+                headers={"Authorization": f"Bearer {auth_setup['token']}"},
+            )
+            assert resp.status_code == 200
+            mock_compile.assert_not_called()  # 关键断言：违规输入根本没进模型
+
+        events = self._events(resp)
+        tokens = [e for e in events if e["type"] == "token"]
+        assert any("抱歉" in e["content"] for e in tokens)
+        assert [e["type"] for e in events if e["type"] == "done"] == ["done"]
+
+        # 拒答也要落库，否则历史里只剩用户那条孤独的消息
+        detail = client.get(
+            f"/api/v1/chat/sessions/{sid}",
+            headers={"Authorization": f"Bearer {auth_setup['token']}"},
+        ).json()
+        assistant_msgs = [m for m in detail["messages"] if m["role"] == "assistant"]
+        assert assistant_msgs and "抱歉" in assistant_msgs[-1]["content"]
+
+    def test_send_message_emits_tool_events(self, auth_setup):
+        """模型调用工具时 SSE 要发 `tool` 事件（前端据此显示"正在检索/生成…"）。"""
+        sid = self._new_session(auth_setup, "工具事件会话")
+
+        async def mock_astream_events(*args, **kwargs):
+            yield {"event": "on_tool_start", "name": "career_knowledge_search", "data": {}}
+            yield {"event": "on_tool_end", "name": "career_knowledge_search", "data": {}}
+            yield {"event": "on_chat_model_stream", "data": {"chunk": {"content": "查到 3 条"}}}
+
+        mock_agent = MagicMock()
+        mock_agent.astream_events = mock_astream_events
+        mock_gateway = MagicMock()
+        mock_gateway.current_model = "deepseek"
+
+        with patch("app.api.v1.chat.get_llm_gateway", return_value=mock_gateway), patch(
+            "app.api.v1.chat.compile_agent", return_value=mock_agent
+        ):
+            resp = client.post(
+                f"/api/v1/chat/sessions/{sid}/messages",
+                json={"content": "现在有哪些前端岗位"},
+                headers={"Authorization": f"Bearer {auth_setup['token']}"},
+            )
+
+        events = self._events(resp)
+        tool_events = [e for e in events if e["type"] == "tool"]
+        assert [e["phase"] for e in tool_events] == ["start", "end"]
+        assert {e["name"] for e in tool_events} == {"career_knowledge_search"}
+        assert any(e["type"] == "token" for e in events)
+
+    def test_send_message_streams_tokens_from_real_agent_events(self, auth_setup):
+        """用**真实** LangGraph 事件（fake LLM）验证 SSE 映射，而不是手写 mock。
+
+        背景：提交版 `chat.py` 读的是 `event["kind"]`，而 LangChain 的事件字典用的是
+        **`event`** 键 → 所有事件都被当成 "" 丢弃（线上表现：回答里只剩追加的免责声明）。
+        手写 mock 也照着 `kind` 写，于是这个 bug 长期没被发现。
+        这里让 LangChain 自己产出事件（只替换模型），从根上守住键名。
+        """
+        from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+        class _FakeLLM(FakeListChatModel):
+            """fake 模型不支持 bind_tools，直接返回自身（本用例只验证事件键名）。"""
+
+            def bind_tools(self, tools, **kwargs):  # type: ignore[override]
+                return self
+
+        sid = self._new_session(auth_setup, "真实事件键名回归")
+
+        mock_gateway = MagicMock()
+        mock_gateway.current_model = "fake"
+        mock_gateway.get_model.return_value = _FakeLLM(responses=["真实流式内容"])
+
+        # 只替换网关、**不 patch compile_agent** → 真正跑 agent 图与真实事件流
+        with patch("app.api.v1.chat.get_llm_gateway", return_value=mock_gateway):
+            resp = client.post(
+                f"/api/v1/chat/sessions/{sid}/messages",
+                json={"content": "你好"},
+                headers={"Authorization": f"Bearer {auth_setup['token']}"},
+            )
+
+        streamed = "".join(e["content"] for e in self._events(resp) if e["type"] == "token")
+        assert "真实流式内容" in streamed
+
+    def test_send_message_appends_disclaimer(self, auth_setup):
+        """输出侧合规：助手回答统一追加免责声明，且**流式内容与落库内容一致**。"""
+        sid = self._new_session(auth_setup, "免责声明会话")
+
+        async def mock_astream_events(*args, **kwargs):
+            yield {"event": "on_chat_model_stream", "data": {"chunk": {"content": "建议多刷算法题。"}}}
+
+        mock_agent = MagicMock()
+        mock_agent.astream_events = mock_astream_events
+        mock_gateway = MagicMock()
+        mock_gateway.current_model = "deepseek"
+
+        with patch("app.api.v1.chat.get_llm_gateway", return_value=mock_gateway), patch(
+            "app.api.v1.chat.compile_agent", return_value=mock_agent
+        ):
+            resp = client.post(
+                f"/api/v1/chat/sessions/{sid}/messages",
+                json={"content": "我该怎么准备"},
+                headers={"Authorization": f"Bearer {auth_setup['token']}"},
+            )
+
+        streamed = "".join(e["content"] for e in self._events(resp) if e["type"] == "token")
+        assert "仅供参考" in streamed  # 流里就带了，不是只写库
+
+        detail = client.get(
+            f"/api/v1/chat/sessions/{sid}",
+            headers={"Authorization": f"Bearer {auth_setup['token']}"},
+        ).json()
+        saved = [m for m in detail["messages"] if m["role"] == "assistant"][-1]["content"]
+        assert saved == streamed  # 用户看到的 = 库里存的
