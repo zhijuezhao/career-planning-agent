@@ -35,16 +35,31 @@ def user_id(client: TestClient, auth_token: str) -> int:
     return resp.json()["id"]
 
 
-def test_list_users(client: TestClient, auth_token: str):
+def test_list_users(client: TestClient, admin_token: str):
+    """列表接口现为 **admin-only**。
+
+    他人 dirty `api/v1/users.py` 把依赖从 `require_auth` 收紧为 `require_admin`
+    （此前任何登录用户都能枚举全部账号）—— 这是正确的收紧，测试随之改用 admin token。
+    学生 token 的行为见 `test_list_users_forbidden_for_student`。
+    """
     resp = client.get(
         "/api/v1/users",
-        headers={"Authorization": f"Bearer {auth_token}"},
+        headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
     data = resp.json()
     assert "total" in data
     assert "items" in data
     assert data["total"] >= 1
+
+
+def test_list_users_forbidden_for_student(client: TestClient, auth_token: str):
+    """收紧的**意图行为**：学生不能枚举全部用户（锁住这条，避免以后被无意放开）。"""
+    resp = client.get(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 403
 
 
 def test_get_user(client: TestClient, auth_token: str, user_id: int):
@@ -58,10 +73,35 @@ def test_get_user(client: TestClient, auth_token: str, user_id: int):
     assert "username" in data
 
 
-def test_get_user_not_found(client: TestClient, auth_token: str):
+def test_get_other_user_forbidden_for_student(
+    client: TestClient, auth_token: str, other_user_id: int
+):
+    """学生读**别人**的资料 → 403（`非 admin 且 非本人` 才拒）。"""
+    resp = client.get(
+        f"/api/v1/users/{other_user_id}",
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_admin_can_read_any_user(client: TestClient, admin_token: str, other_user_id: int):
+    """admin 仍可读任意用户（收紧条件里的 `or current_user.role == "admin"` 这一半）。"""
+    resp = client.get(
+        f"/api/v1/users/{other_user_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == other_user_id
+
+
+def test_get_user_not_found(client: TestClient, admin_token: str):
+    """不存在的用户 → 404。
+
+    必须用 admin token：学生查别人的 id 会先被 403 拦住，根本走不到 404 分支。
+    """
     resp = client.get(
         "/api/v1/users/999999",
-        headers={"Authorization": f"Bearer {auth_token}"},
+        headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 404
 
