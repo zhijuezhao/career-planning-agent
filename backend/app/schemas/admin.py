@@ -83,10 +83,15 @@ class JobProfileResponse(BaseModel):
     salary_range: str | None
     education_requirement: str | None
     experience_requirement: str | None
-    career_path: dict | None
-    transition_paths: dict | None
+    # 2026-09-26 实测（真实导入 #853 的 82 条画像）：同一列存在多种形状 ——
+    # `transition_paths` 5 条是字符串数组（换岗方向）/ 3 条 object；`outlook` 4 条是
+    # 字符串（"成熟"/"转型中"）/ 78 条 object；`career_path` 目前全 null 但持久化层
+    # （`job_persist_service` 写的是 `career_paths` 列表）同样会产出数组。
+    # 只收 dict 会让**整个岗位列表 500**（与上面 hard_skills 同一类问题，实测已复现）。
+    career_path: dict | list | str | None
+    transition_paths: dict | list | str | None
     requirement_intensity: dict | None
-    outlook: dict | None
+    outlook: dict | list | str | None
     summary: str | None
     source_data_ids: dict | None
     # B2-2：公司实体（company_name 由接口 join 填充，ORM 上不存在该列）
@@ -125,10 +130,11 @@ class JobProfileCreate(BaseModel):
     salary_range: str | None = Field(None, max_length=50)
     education_requirement: str | None = Field(None, max_length=50)
     experience_requirement: str | None = Field(None, max_length=100)
-    career_path: dict | None = None
-    transition_paths: dict | None = None
+    # 与 JobProfileResponse 一致：真实画像里这三种值可能是对象/数组/字符串。
+    career_path: dict | list | str | None = None
+    transition_paths: dict | list | str | None = None
     requirement_intensity: dict | None = None
-    outlook: dict | None = None
+    outlook: dict | list | str | None = None
     summary: str | None = None
 
 
@@ -141,10 +147,12 @@ class JobProfileUpdate(BaseModel):
     salary_range: str | None = Field(None, max_length=50)
     education_requirement: str | None = Field(None, max_length=50)
     experience_requirement: str | None = Field(None, max_length=100)
-    career_path: dict | None = None
-    transition_paths: dict | None = None
+    # 与 JobProfileResponse 一致：真实画像里这三种值可能是对象/数组/字符串，
+    # 只收 dict 会让「编辑后保存」对真实数据 422。
+    career_path: dict | list | str | None = None
+    transition_paths: dict | list | str | None = None
     requirement_intensity: dict | None = None
-    outlook: dict | None = None
+    outlook: dict | list | str | None = None
     summary: str | None = None
 
 
