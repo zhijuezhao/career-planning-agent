@@ -116,15 +116,18 @@ class TestJobsAPI:
 
     def test_filter_jobs(self, admin_token: str, client: TestClient):
         """Test filtering job profiles."""
-        # Create jobs with different industries
+        # 创建不同行业的岗位
         client.post(
             "/api/v1/admin/jobs",
             json={"title": f"互联网岗位_{_ts}", "industry": "互联网"},
             headers={"Authorization": f"Bearer {admin_token}"},
         )
+        # P2 回归：这里以前用**字面量** `金融岗位`（没有时间戳）→ 每次跑测试都插一条，
+        # 历史上一共堆了 63 条（数据卫生清理时才发现）。加了 `(岗位名, 公司)` 唯一索引后
+        # 第二次插入直接 UniqueViolation → 500。测试数据必须自带唯一后缀。
         client.post(
             "/api/v1/admin/jobs",
-            json={"title": "金融岗位", "industry": "金融"},
+            json={"title": f"金融岗位_{_ts}", "industry": "金融"},
             headers={"Authorization": f"Bearer {admin_token}"},
         )
 
@@ -136,3 +139,46 @@ class TestJobsAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert all(item["industry"] == "互联网" for item in data["items"])
+
+    def test_create_duplicate_title_returns_409(self, admin_token: str, client: TestClient):
+        """P2：`(岗位名, 公司)` 唯一 —— 管理端重复新建应得 **409**，不能是 500。
+
+        归一化后同名也算重复（忽略大小写 + 折叠空白）。
+        """
+        title = f"测试岗位_冲突_{_ts}"
+        headers = {"Authorization": f"Bearer {admin_token}"}
+
+        first = client.post("/api/v1/admin/jobs", json={"title": title}, headers=headers)
+        assert first.status_code == 201, first.text
+
+        second = client.post(
+            "/api/v1/admin/jobs", json={"title": f"  {title.upper()}  "}, headers=headers
+        )
+        assert second.status_code == 409, second.text
+        assert "已存在" in second.json()["detail"]
+
+    def test_update_title_to_duplicate_returns_409(self, admin_token: str, client: TestClient):
+        """P2：改名撞上另一条同键岗位 → 409（编辑弹窗要看得懂）。"""
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        kept = client.post(
+            "/api/v1/admin/jobs", json={"title": f"测试岗位_占用_{_ts}"}, headers=headers
+        ).json()
+        other = client.post(
+            "/api/v1/admin/jobs", json={"title": f"测试岗位_待改_{_ts}"}, headers=headers
+        ).json()
+
+        resp = client.put(
+            f"/api/v1/admin/jobs/{other['id']}",
+            json={"title": kept["title"]},
+            headers=headers,
+        )
+        assert resp.status_code == 409, resp.text
+
+        # 改成自己的原名不受影响
+        ok = client.put(
+            f"/api/v1/admin/jobs/{other['id']}",
+            json={"title": other["title"], "level": "高级"},
+            headers=headers,
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["level"] == "高级"

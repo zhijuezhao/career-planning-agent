@@ -1,10 +1,22 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Computed,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.database import Base
+
+# 岗位去重键的标题部分（P2）：生成列，DDL 的唯一来源见 apply_ddl.py / core/dedup_keys.py
+_TITLE_KEY_EXPR = "lower(regexp_replace(btrim(title), '\\s+', ' ', 'g'))"
 
 
 class JobProfile(Base):
@@ -12,6 +24,11 @@ class JobProfile(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # P2：`(title_key, company_id)` 是岗位去重粒度。生成列由数据库算，**不可写**
+    # （`Computed` 让 SQLAlchemy 把它排除在 INSERT/UPDATE 之外）。
+    title_key: Mapped[str | None] = mapped_column(
+        String(200), Computed(_TITLE_KEY_EXPR, persisted=True)
+    )
     industry: Mapped[str | None] = mapped_column(String(100))
     level: Mapped[str | None] = mapped_column(String(20))
     hard_skills: Mapped[dict | None] = mapped_column(JSONB)

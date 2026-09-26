@@ -23,10 +23,11 @@ class TestDeduplicateJobs:
             {"title": "前端工程师", "company": "A", "city": "北京"},
         ]
         result = await deduplicate_jobs.ainvoke({"rows": rows})
-        # No code → exact dedup does nothing, but fuzzy dedup catches identical rows
+        # 没 code → 编码精确去重不动它；但 (岗位名, 公司) 完全相同 → 第二级精确去重命中
         assert result["total"] == 1
         assert result["exact_dedup_count"] == 0
-        assert result["fuzzy_dedup_count"] == 1
+        assert result["title_company_dedup_count"] == 1
+        assert result["fuzzy_dedup_count"] == 0
 
     @pytest.mark.asyncio
     async def test_fuzzy_dedup_similar_titles(self):
@@ -36,19 +37,46 @@ class TestDeduplicateJobs:
             {"title": "Java开发工程师", "company": "ABC", "city": "北京"},
         ]
         result = await deduplicate_jobs.ainvoke({"rows": rows, "fuzzy_threshold": 0.85})
-        # First two identical → fuzzy deduped, third kept
+        # 前两条完全相同 → 被 (岗位名,公司) 精确去重拦下；第三条相似度不够 → 保留
         assert result["total"] == 2
-        assert result["fuzzy_dedup_count"] == 1
+        assert result["title_company_dedup_count"] == 1
+        assert result["fuzzy_dedup_count"] == 0
 
     @pytest.mark.asyncio
-    async def test_fuzzy_dedup_different_city_kept(self):
+    async def test_same_title_and_company_ignores_city(self):
+        """P2：城市**不在**去重键里 —— 同公司同岗位名、城市不同 → 同一条岗位。
+
+        这是用户选定的粒度 `(岗位名, 公司)` 的直接推论（城市不是身份的一部分）。
+        如果以后要"同岗多城市各算一条"，得把城市加进键里（并同步改唯一索引）。
+        """
         rows = [
             {"title": "前端工程师", "company": "ABC", "city": "北京"},
             {"title": "前端工程师", "company": "ABC", "city": "上海"},
         ]
         result = await deduplicate_jobs.ainvoke({"rows": rows})
-        assert result["total"] == 2
-        assert result["fuzzy_dedup_count"] == 0
+        assert result["total"] == 1
+        assert result["title_company_dedup_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_fuzzy_dedup_one_sided_city_is_not_a_veto(self):
+        """P2：只有一边写了城市时不应判成两个岗位（旧实现要求城市严格相等）。"""
+        rows = [
+            {"title": "前端工程师", "company": "ABC", "city": "北京"},
+            {"title": "前端工程师", "company": "ABC", "city": None},
+        ]
+        result = await deduplicate_jobs.ainvoke({"rows": rows})
+        assert result["total"] == 1
+
+    @pytest.mark.asyncio
+    async def test_title_company_dedup_normalises_case_and_whitespace(self):
+        """P2：归一化后相同即重复（忽略大小写 + 折叠空白）。"""
+        rows = [
+            {"title": "Java  开发工程师", "company": "  ABC 科技 ", "city": "北京"},
+            {"title": "java 开发工程师", "company": "ABC 科技", "city": "北京"},
+        ]
+        result = await deduplicate_jobs.ainvoke({"rows": rows})
+        assert result["total"] == 1
+        assert result["title_company_dedup_count"] == 1
 
     @pytest.mark.asyncio
     async def test_fuzzy_dedup_different_company_kept(self):
@@ -57,7 +85,9 @@ class TestDeduplicateJobs:
             {"title": "前端工程师", "company": "XYZ公司", "city": "北京"},
         ]
         result = await deduplicate_jobs.ainvoke({"rows": rows})
+        # P2：同岗不同公司 = 两条画像 → 必须都保留
         assert result["total"] == 2
+        assert result["title_company_dedup_count"] == 0
         assert result["fuzzy_dedup_count"] == 0
 
     @pytest.mark.asyncio
@@ -76,6 +106,7 @@ class TestDeduplicateJobs:
         assert result["total"] == 0
         assert result["deduped_rows"] == []
         assert result["exact_dedup_count"] == 0
+        assert result["title_company_dedup_count"] == 0
         assert result["fuzzy_dedup_count"] == 0
 
     @pytest.mark.asyncio
@@ -100,6 +131,6 @@ class TestDeduplicateJobs:
             {"title": "前端工程师", "company": float("nan"), "city": "北京"},
         ]
         result = await deduplicate_jobs.ainvoke({"rows": rows})
-        # 公司为空视为不冲突 → 标题相同 + 城市相同 → 判为重复
+        # 公司为空视为"未知"（不冲突）→ 标题相同 → (岗位名, 公司) 精确去重命中
         assert result["total"] == 1
-        assert result["fuzzy_dedup_count"] == 1
+        assert result["title_company_dedup_count"] == 1

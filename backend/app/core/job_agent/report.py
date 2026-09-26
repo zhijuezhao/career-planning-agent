@@ -78,7 +78,8 @@ def generate_quality_report(
             "| 去重类型 | 去除数量 |",
             "|----------|----------|",
             f"| 精确去重（岗位编码） | {dedup_stats.get('exact', 0)} |",
-            f"| 模糊去重（公司+岗位+城市） | {dedup_stats.get('fuzzy', 0)} |",
+            f"| 精确去重（岗位名+公司） | {dedup_stats.get('title_company', 0)} |",
+            f"| 模糊去重（同公司内近似岗位名） | {dedup_stats.get('fuzzy', 0)} |",
             "",
         ])
 

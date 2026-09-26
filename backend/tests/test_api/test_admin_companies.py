@@ -94,7 +94,11 @@ def _headers(token: str) -> dict[str, str]:
 
 
 async def _seed_same_title() -> dict[str, int]:
-    """同一岗位名被两家公司招（B2-5 场景）：返回 job_id + 两家公司 id。
+    """同一岗位名被两家公司招（B2-5 场景）：返回两家公司各自的画像 id + 公司 id。
+
+    **P2 起语义变了**：去重粒度是 `(岗位名, 公司)`，所以这不再是"1 条画像 + 2 条关联"，
+    而是**2 条画像**（每家一条）。B2-5 的"在招公司/company_count"读侧按 `title_key`
+    汇总同名画像，所以对使用者来说能力不变。
 
     用独立子前缀（`<prefix>-L`），避免污染其它用例对 `_company("")` 前缀的精确断言。
     """
@@ -102,10 +106,10 @@ async def _seed_same_title() -> dict[str, int]:
     name_a = f"{_PREFIX}-L_同岗甲"
     name_b = f"{_PREFIX}-L_同岗乙"
     async with test_session_factory() as session:
-        profile, _ = await upsert_job_profile(
+        profile_a, _ = await upsert_job_profile(
             session, {"title": title, "company": name_a, "industry": "互联网"}
         )
-        await upsert_job_profile(session, {"title": title, "company": name_b})
+        profile_b, _ = await upsert_job_profile(session, {"title": title, "company": name_b})
         await session.commit()
 
         company_ids = {}
@@ -114,7 +118,9 @@ async def _seed_same_title() -> dict[str, int]:
                 await session.execute(select(Company.id).where(Company.name == name))
             ).scalar_one()
         return {
-            "job_id": int(profile.id),
+            "job_id": int(profile_a.id),
+            "job_id_a": int(profile_a.id),
+            "job_id_b": int(profile_b.id),
             "company_a": company_ids[name_a],
             "company_b": company_ids[name_b],
             "name_a": name_a,
@@ -123,23 +129,27 @@ async def _seed_same_title() -> dict[str, int]:
 
 
 class TestJobCompanyLinksAPI:
-    """B2-5：岗位 ↔ 公司 多对多的两个查询方向（管理端接口）。"""
+    """B2-5 的两个查询方向 + P2 的"同名多公司"读侧汇总（管理端接口）。"""
 
-    def test_jobs_filter_matches_linked_company_not_only_primary(self, client, admin_token):
+    def test_jobs_filter_finds_each_companys_own_profile(self, client, admin_token):
         seeded = asyncio.run(_seed_same_title())
-        job_id = seeded["job_id"]
 
-        for key in ("company_a", "company_b"):
+        # P2：每家公司在库里有自己的那条画像（不再是共用一条）
+        for key, job_key in (("company_a", "job_id_a"), ("company_b", "job_id_b")):
             resp = client.get(
                 "/api/v1/admin/jobs",
                 params={"company_id": seeded[key]},
                 headers=_headers(admin_token),
             )
             assert resp.status_code == 200, resp.text
-            ids = [i["id"] for i in resp.json()["items"]]
-            assert job_id in ids, f"{key} 应能通过关联表查到该岗位"
+            items = resp.json()["items"]
+            assert seeded[job_key] in [i["id"] for i in items], key
+            assert all(i["company_id"] == seeded[key] for i in items), key
+
+        assert seeded["job_id_a"] != seeded["job_id_b"]
 
     def test_job_list_exposes_company_count(self, client, admin_token):
+        """`company_count` = **同名岗位下有多少家公司**（按 title_key 汇总）。"""
         seeded = asyncio.run(_seed_same_title())
         resp = client.get(
             "/api/v1/admin/jobs",
@@ -161,7 +171,8 @@ class TestJobCompanyLinksAPI:
         assert names == {seeded["name_a"], seeded["name_b"]}
         primaries = [c for c in data["companies"] if c["is_primary"]]
         assert len(primaries) == 1
-        assert primaries[0]["company_id"] == data["company_id"]  # 主公司 = 首次那家
+        # 主公司 = 这条画像自己的公司（P2：不再是"首次那家"）
+        assert primaries[0]["company_id"] == data["company_id"] == seeded["company_a"]
 
     def test_company_detail_shows_linked_jobs(self, client, admin_token):
         seeded = asyncio.run(_seed_same_title())
@@ -171,7 +182,8 @@ class TestJobCompanyLinksAPI:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["job_count"] == 1
-        assert [j["id"] for j in data["jobs"]] == [seeded["job_id"]]
+        # P2：乙公司名下是它自己那条同名画像
+        assert [j["id"] for j in data["jobs"]] == [seeded["job_id_b"]]
 
     def test_sync_backfills_links_and_reports_count(self, client, admin_token):
         resp = client.post("/api/v1/admin/companies/sync", headers=_headers(admin_token))

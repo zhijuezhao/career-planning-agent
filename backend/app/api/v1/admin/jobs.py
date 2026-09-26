@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
+from app.core.dedup_keys import normalise_title
 from app.core.matching import embed_job
 from app.domain.models.company import Company
 from app.domain.models.job import JobProfile
@@ -32,16 +34,24 @@ async def _company_names(db: AsyncSession, jobs: list[JobProfile]) -> dict[int, 
     return {row[0]: row[1] for row in rows.all()}
 
 
-async def _company_counts(db: AsyncSession, job_ids: list[int]) -> dict[int, int]:
-    """给当前页岗位批量补「有多少家公司在招」（B2-5，一次查询，无 N+1）。"""
-    if not job_ids:
+async def _company_counts(db: AsyncSession, jobs: list[JobProfile]) -> dict[int, int]:
+    """给当前页岗位批量补「有多少家公司在招」（B2-5，一次查询，无 N+1）。
+
+    **P2 起口径变了**：岗位去重粒度是 `(岗位名, 公司)`，同一岗位名会被拆成多条画像
+    （每家一条），所以"这个岗位有几家公司在招"不能再数单条画像的关联行（那永远是 1）。
+    现在按 `title_key` **汇总同名画像的公司集合** —— 对使用者来说 B2-5 的能力没变，
+    只是数据表示从"1 条画像 + N 条关联"变成"N 条画像"。
+    """
+    keys = {j.title_key for j in jobs if j.title_key}
+    if not keys:
         return {}
     rows = await db.execute(
-        select(JobCompanyLink.job_profile_id, func.count())
-        .where(JobCompanyLink.job_profile_id.in_(job_ids))
-        .group_by(JobCompanyLink.job_profile_id)
+        select(JobProfile.title_key, func.count(func.distinct(JobProfile.company_id)))
+        .where(JobProfile.title_key.in_(keys), JobProfile.company_id.isnot(None))
+        .group_by(JobProfile.title_key)
     )
-    return {row[0]: row[1] for row in rows.all()}
+    by_key = {row[0]: row[1] for row in rows.all()}
+    return {j.id: by_key.get(j.title_key, 0) for j in jobs}
 
 
 def _job_response(
@@ -87,7 +97,7 @@ async def list_jobs(
     result = await db.execute(query)
     jobs = list(result.scalars().all())
     names = await _company_names(db, jobs)
-    counts = await _company_counts(db, [j.id for j in jobs])
+    counts = await _company_counts(db, jobs)
 
     return JobProfileListResponse(
         total=total,
@@ -101,41 +111,93 @@ async def get_job(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """岗位详情：含「在招公司」清单（B2-5）。"""
+    """岗位详情：含「在招公司」清单（B2-5；P2 起按 `title_key` 汇总同名画像）。"""
     job = await db.get(JobProfile, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job profile not found")
 
-    rows = (
-        await db.execute(
-            select(JobCompanyLink, Company)
-            .join(Company, Company.id == JobCompanyLink.company_id)
-            .where(JobCompanyLink.job_profile_id == job_id)
-            .order_by(JobCompanyLink.first_seen_at.asc(), JobCompanyLink.id.asc())
+    # P2：同一岗位名 × N 家公司 = N 条画像 —— 「在招公司」= 同名画像各自的公司。
+    siblings = list(
+        (
+            await db.execute(
+                select(JobProfile, Company)
+                .join(Company, Company.id == JobProfile.company_id)
+                .where(JobProfile.title_key == job.title_key)
+                .order_by(JobProfile.id.asc())
+            )
+        ).all()
+    )
+    sibling_ids = [profile.id for profile, _ in siblings]
+    link_rows = (
+        (
+            await db.execute(
+                select(JobCompanyLink).where(JobCompanyLink.job_profile_id.in_(sibling_ids))
+            )
         )
-    ).all()
+        .scalars()
+        .all()
+        if sibling_ids
+        else []
+    )
+    # 命中次数/最近出现时间仍以关联表为准（B3 链接富化会累加它）
+    links = {(link.job_profile_id, link.company_id): link for link in link_rows}
 
-    primary_name = next((c.name for link, c in rows if link.company_id == job.company_id), None)
+    primary_name = next(
+        (company.name for profile, company in siblings if profile.id == job.id), None
+    )
     if primary_name is None:
         names = await _company_names(db, [job])
         primary_name = names.get(job.company_id)
 
     detail = JobProfileDetail.model_validate(job)
     detail.company_name = primary_name
-    detail.company_count = len(rows)
+    detail.company_count = len({company.id for _profile, company in siblings})
     detail.companies = [
         JobCompanyLinkInfo(
             company_id=company.id,
             company_name=company.name,
             industry=company.industry,
             city=company.city,
-            hit_count=link.hit_count,
-            last_seen_at=link.last_seen_at,
+            hit_count=links[(profile.id, company.id)].hit_count
+            if (profile.id, company.id) in links
+            else 1,
+            last_seen_at=links[(profile.id, company.id)].last_seen_at
+            if (profile.id, company.id) in links
+            else None,
             is_primary=(company.id == job.company_id),
         )
-        for link, company in rows
+        for profile, company in siblings
     ]
     return detail
+
+
+async def _assert_title_company_free(
+    db: AsyncSession,
+    *,
+    title: str,
+    company_id: int | None,
+    exclude_id: int | None = None,
+) -> None:
+    """P2：`(岗位名, 公司)` 唯一 —— 管理端手工建/改岗位时先查一次，撞了给 **409** 而不是 500。
+
+    条件必须与唯一索引 `uq_job_profiles_title_company (title_key, company_id) NULLS NOT DISTINCT`
+    **完全一致**：`company_id IS NULL` 只和 NULL 冲突（NULL 与非 NULL 在 PG 里仍是不同的键）。
+    并发下仍可能漏过这里，所以调用方还要兜 `IntegrityError`。
+    """
+    condition = (
+        JobProfile.company_id.is_(None)
+        if company_id is None
+        else JobProfile.company_id == company_id
+    )
+    query = select(JobProfile.id).where(JobProfile.title_key == normalise_title(title), condition)
+    if exclude_id is not None:
+        query = query.where(JobProfile.id != exclude_id)
+    duplicate_id = (await db.execute(query.limit(1))).scalar_one_or_none()
+    if duplicate_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"岗位已存在：同名（忽略大小写与空格）且同公司的岗位 id={duplicate_id}",
+        )
 
 
 @router.post("", response_model=JobProfileResponse, status_code=status.HTTP_201_CREATED)
@@ -145,9 +207,18 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new job profile."""
+    # 管理端没有"公司"输入项 → 新岗位的 company_id 恒为 NULL，键就是 (title_key, NULL)
+    await _assert_title_company_free(db, title=data.title, company_id=None)
+
     job = JobProfile(**data.model_dump())
     db.add(job)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="岗位已存在（同名同公司，并发写入）"
+        ) from exc
     await db.refresh(job)
 
     # Generate embedding for the new job
@@ -169,10 +240,21 @@ async def update_job(
         raise HTTPException(status_code=404, detail="Job profile not found")
 
     update_data = data.model_dump(exclude_unset=True)
+    if "title" in update_data and update_data["title"]:
+        # 改标题可能撞上另一条同键岗位 → 同样给 409（不然是 500）
+        await _assert_title_company_free(
+            db, title=str(update_data["title"]), company_id=job.company_id, exclude_id=job.id
+        )
     for field, value in update_data.items():
         setattr(job, field, value)
 
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="岗位已存在（同名同公司，并发写入）"
+        ) from exc
     await db.refresh(job)
     return job
 

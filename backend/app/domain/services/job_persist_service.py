@@ -1,4 +1,4 @@
-"""岗位落库服务（B2-2 / B2-5）：`db_writer` 工具与导入流水线共用的 upsert 逻辑。
+"""岗位落库服务（B2-2 / B2-5 / P2）：`db_writer` 工具与导入流水线共用的 upsert 逻辑。
 
 拆分原因：原 `db_writer._write_profile` 把「开 session + 业务 upsert」揉在一起，
 导入流水线要落库时只能复制一份；现在业务逻辑集中在这里，两处调用同一实现。
@@ -7,16 +7,26 @@
 本层只负责**空值不覆盖已有值**（`_pick`）。
 
 B2-5：upsert 岗位画像时同时写 `job_company_links`（岗位 ↔ 公司 多对多）。
-`job_profiles.company_id` 只记「主公司」，且**首次为准不再漂移** ——
-否则「同一岗位名、不同公司」的第二条会把第一条的公司覆盖掉（旧实现的数据缺陷）。
+
+**P2（2026-09-26 用户拍板）**：去重粒度由「只看岗位名」改为 **`(归一化岗位名, 公司)`** ——
+同一岗位名 × N 家公司 = **N 条画像**。要点：
+
+1. 定位用 `job_profiles.title_key` 生成列（`lower(regexp_replace(btrim(title), '\\s+', ' ', 'g'))`）
+   + `company_id`，并由唯一索引 `uq_job_profiles_title_company` 在 DB 层兜底；
+2. **公司未知 ≠ 另一家公司**：没有公司列时 `company_id IS NULL` 只是"未知桶"。
+   含公司数据首次出现时，**收养**（adopt）此前"公司未知"的同名画像而不是新建一条，
+   否则用户"先导职业路线表、再导含公司表"会把同一个岗位裂成两条；
+3. `title_key` 是**生成列**，永远不要手写：DDL 见 `apply_ddl.py`，规则见 `core/dedup_keys.py`。
 """
 
 from __future__ import annotations
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.dedup_keys import normalise_title
 from app.domain.models.job import JobProfile, JobRawData
 from app.domain.services.company_service import (
     link_job_company,
@@ -51,28 +61,65 @@ async def write_raw_job(session: AsyncSession, data: dict) -> JobRawData:
     return row
 
 
+async def _find_profile(
+    session: AsyncSession, title_key: str, company_id: int | None
+) -> tuple[JobProfile | None, bool]:
+    """按 `(title_key, company_id)` 定位既有画像。
+
+    返回 `(画像或 None, 是否需要把 company_id 落定)`。
+
+    公司已知时：先找精确的 `(title_key, company_id)`；没有就**收养**同名的
+    "公司未知"（`company_id IS NULL`）画像 —— 这是"先导无公司表、再导含公司表"
+    不产生重复岗位的关键。
+    公司未知时：先找"未知桶"；没有就退让到该岗位名下 id 最小的一条
+    （"未知"没有区分能力，不该把一个已有岗位裂成两条）。
+    """
+    base = select(JobProfile).where(JobProfile.title_key == title_key)
+
+    if company_id is not None:
+        hit = (
+            await session.execute(base.where(JobProfile.company_id == company_id).limit(1))
+        ).scalar_one_or_none()
+        if hit is not None:
+            return hit, False
+        adopted = (
+            await session.execute(base.where(JobProfile.company_id.is_(None)).limit(1))
+        ).scalar_one_or_none()
+        return adopted, adopted is not None
+
+    hit = (
+        await session.execute(base.where(JobProfile.company_id.is_(None)).limit(1))
+    ).scalar_one_or_none()
+    if hit is not None:
+        return hit, False
+    fallback = (
+        await session.execute(base.order_by(JobProfile.id).limit(1))
+    ).scalar_one_or_none()
+    return fallback, False
+
+
 async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProfile, bool]:
-    """按 title 去重 upsert 岗位画像；顺带 upsert 公司、写「岗位↔公司」关联。
+    """按 `(岗位名, 公司)` 去重 upsert 岗位画像；顺带 upsert 公司、写「岗位↔公司」关联。
 
     返回 (profile, created)。title 为空抛 ValueError（调用方按行容错）。
 
-    公司归属（B2-5）：
-    - `job_company_links` 记录**全部**在招公司（同一岗位可被多家公司招）；
-    - `job_profiles.company_id` 只记「主公司」，**首次为准**，后续导入不再覆盖
-      （旧实现每行都覆盖，导致"同一岗位名、不同公司"时公司归属漂移且旧公司计数陈旧）。
+    公司归属（P2 起）：`job_profiles.company_id` 就是键的一部分（每个岗位一条公司），
+    不再需要 B2-5 那个"首次为准、后续不覆盖"的补丁 —— 同名不同公司本来就会落成两条画像；
+    `job_company_links` 仍然记录全部在招公司（B3 链接富化与历史来源要用）。
     """
-    title = str(data.get("title") or "").strip()
-    if not title:
+    raw_title = str(data.get("title") or "").strip()
+    if not raw_title:
         raise ValueError("title is required")
-    title = title[:200]
+    title = raw_title[:200]
+    title_key = normalise_title(title)
 
     company = await upsert_company(
         session, data.get("company"), industry=data.get("industry"), city=data.get("city")
     )
 
-    existing = (
-        await session.execute(select(JobProfile).where(JobProfile.title == title).limit(1))
-    ).scalar_one_or_none()
+    existing, adopt_company = await _find_profile(
+        session, title_key, company.id if company is not None else None
+    )
 
     five_dim = data.get("five_dimensions") or {}
     outlook = data.get("outlook") or {}
@@ -96,8 +143,9 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
         existing.requirement_intensity = _pick(data, "five_dimensions", existing.requirement_intensity)
         existing.outlook = _pick(data, "outlook", existing.outlook)
         existing.summary = _pick(data, "summary", existing.summary)
-        if company is not None and existing.company_id is None:
-            # 主公司只在为空时落定，避免"同岗多公司"互相覆盖
+        if company is not None and (adopt_company or existing.company_id is None):
+            # 收养"公司未知"的同名画像：把公司落定，让键从 (title, NULL) 变成 (title, 公司)。
+            # 只在精确键不存在时才走到这里，故不会撞唯一索引（并发竞态由调用方重试兜底）。
             existing.company_id = company.id
         profile, created = existing, False
     else:
@@ -160,19 +208,41 @@ async def persist_import_rows(
     }
 
     for row in rows:
-        try:
-            async with session.begin_nested():  # 行级 SAVEPOINT
-                await write_raw_job(session, {**row, "source": source})
-                _profile, created = await upsert_job_profile(session, row)
+        written = False
+        created = False
+        last_exc: Exception | None = None
+        # P2：唯一索引 `uq_job_profiles_title_company` 会让**并发**写入同一
+        # `(岗位名, 公司)` 的第二条抛 IntegrityError。这与"这行数据脏"不是一回事：
+        # savepoint 回滚后重查一次即可转成 update（赢家那条已经落定）。
+        for attempt in (1, 2):
+            try:
+                async with session.begin_nested():  # 行级 SAVEPOINT
+                    await write_raw_job(session, {**row, "source": source})
+                    _profile, created = await upsert_job_profile(session, row)
+                written = True
+                break
+            except IntegrityError as exc:
+                last_exc = exc
+                logger.warning(
+                    "岗位唯一键冲突（多为并发导入同一岗位），重试 | title={!r} | attempt={} | error={}",
+                    row.get("title"),
+                    attempt,
+                    getattr(exc, "orig", exc),
+                )
+            except Exception as exc:  # noqa: BLE001 - 行级容错
+                last_exc = exc
+                break
+
+        if written:
             # 计数放在 savepoint 正常退出之后：行内失败时计数不应虚增
             stats["raw_written"] += 1
             stats["profiles_new" if created else "profiles_updated"] += 1
-        except Exception as exc:  # noqa: BLE001 - 行级容错
+        else:
             stats["failed"] += 1
             if len(stats["errors"]) < 5:
                 title = row.get("title") or "未知岗位"
-                stats["errors"].append(f"{title}：{exc}"[:200])
-            logger.warning("导入行落库失败 | title={!r} | error={}", row.get("title"), exc)
+                stats["errors"].append(f"{title}：{last_exc}"[:200])
+            logger.warning("导入行落库失败 | title={!r} | error={}", row.get("title"), last_exc)
 
     for row in rejected_rows or []:
         try:

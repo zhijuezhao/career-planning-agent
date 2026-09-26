@@ -102,8 +102,9 @@ async def node_dedup(state: JobImportState) -> dict:
     result = await deduplicate_jobs.ainvoke({"rows": state["cleaned_rows"]})
     deduped = result.get("deduped_rows", [])
     logger.info(
-        "Import: dedup completed | exact={} fuzzy={} remaining={}",
+        "Import: dedup completed | exact={} title_company={} fuzzy={} remaining={}",
         result.get("exact_dedup_count", 0),
+        result.get("title_company_dedup_count", 0),
         result.get("fuzzy_dedup_count", 0),
         len(deduped),
     )

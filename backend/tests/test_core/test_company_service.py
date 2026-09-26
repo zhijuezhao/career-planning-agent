@@ -1,11 +1,13 @@
-"""B2-2 / B2-5 单元/集成测试：公司 upsert、岗位↔公司关联、导入批量落库（真实 dev DB）。
+"""B2-2 / B2-5 / P2 单元/集成测试：公司 upsert、岗位↔公司关联、导入批量落库（真实 dev DB）。
 
 范围：
     * `normalise_company_name` 纯函数规则；
     * `upsert_company` 幂等 + 只在空字段时补全；
     * `upsert_job_profile` 挂 company_id、维护 job_count、空值不覆盖已有画像；
-    * **B2-5**：同一岗位名多家公司 → 关联表两条、主公司不漂移、双方 job_count 正确；
-      关联幂等（hit_count 累加）、`backfill_links_from_profiles` 幂等;
+    * **B2-5**：同一岗位名多家公司 → 关联与计数；关联幂等（hit_count 累加）、
+      `backfill_links_from_profiles` 幂等；
+    * **P2（2026-09-26）**：去重粒度 `(岗位名, 公司)` —— 同名不同公司 2 条画像、
+      归一化合并大小写/空白、无公司画像被首家已知公司"收养"、唯一索引在 DB 层兜底；
     * `persist_import_rows` 的统计与**行级容错**（一行没 title 不该拖垮其他行）。
 
 所有用例只创建 `b22_<ts>_*` 前缀的数据，结束时按前缀 + 自增 id 精确清理。
@@ -16,6 +18,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from app.core.dedup_keys import normalise_title
 from app.domain.models.company import Company
 from app.domain.models.job import JobProfile, JobRawData
 from app.domain.models.job_company_link import JobCompanyLink
@@ -32,6 +35,7 @@ from app.domain.services.job_persist_service import (
     write_raw_job,
 )
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from tests.conftest import test_session_factory
 
 _PREFIX = f"b22_{int(time.time())}"
@@ -46,13 +50,19 @@ def _company(name: str) -> str:
 
 
 async def _cleanup() -> None:
-    """按前缀删除本模块创建的公司/岗位/原始行（顺序：先解绑再删公司）。"""
+    """按前缀删除本模块创建的公司/岗位/原始行（顺序：先解绑再删公司）。
+
+    岗位用 `lower(btrim(title))` 匹配：P2 的归一化用例会写入大小写/前后空白不同的
+    标题变体，普通 `LIKE 'b22_%'` 会漏掉带前后空格的那些。
+    """
     async with test_session_factory() as session:
         await session.execute(
-            text("DELETE FROM job_profiles WHERE title LIKE :p"), {"p": f"{_PREFIX}%"}
+            text("DELETE FROM job_profiles WHERE lower(btrim(title)) LIKE :p"),
+            {"p": f"{_PREFIX.lower()}%"},
         )
         await session.execute(
-            text("DELETE FROM job_raw_data WHERE title LIKE :p"), {"p": f"{_PREFIX}%"}
+            text("DELETE FROM job_raw_data WHERE lower(btrim(title)) LIKE :p"),
+            {"p": f"{_PREFIX.lower()}%"},
         )
         await session.execute(
             text("DELETE FROM companies WHERE name LIKE :p"), {"p": f"{_PREFIX}%"}
@@ -269,36 +279,47 @@ class TestPersistImportRows:
 
 
 class TestJobCompanyLinks:
-    """B2-5：岗位 ↔ 公司 多对多（同一岗位可被多家公司招）。"""
+    """B2-5 + P2：岗位 ↔ 公司。
 
-    async def test_same_title_two_companies_keeps_both_links(self):
+    ⚠️ **P2（2026-09-26）改了粒度**：去重键从「只看岗位名」变成 `(岗位名, 公司)`。
+    所以"同一岗位名被两家公司招"**不再是**"1 条画像 + 2 条关联"，而是
+    **2 条画像**（每家一条，各自 `company_id`）。B2-5 的能力在**读**这一侧保留：
+    管理端 `company_count` / 「在招公司」按 `title_key` 汇总同名画像（见 `test_admin_companies.py`）。
+    """
+
+    async def test_same_title_two_companies_makes_two_profiles(self):
         title = _title("同岗多公司")
         async with test_session_factory() as session:
             profile_a, created_a = await upsert_job_profile(
                 session, {"title": title, "company": _company("甲公司X")}
             )
-            primary_company_id = profile_a.company_id
+            company_a_id = profile_a.company_id
             profile_b, created_b = await upsert_job_profile(
                 session, {"title": title, "company": _company("乙公司X")}
             )
             await session.commit()
 
-            # 画像仍按 title 去重
-            assert created_a is True and created_b is False
-            assert profile_b.id == profile_a.id
-            # 主公司首次为准，不被后来者覆盖
-            assert profile_b.company_id == primary_company_id
+            # P2：两条独立画像，各挂各的公司
+            assert created_a is True and created_b is True
+            assert profile_b.id != profile_a.id
+            assert profile_b.company_id != company_a_id
+            assert profile_a.title_key == profile_b.title_key
 
-            links = list(
-                (
-                    await session.execute(
-                        select(JobCompanyLink).where(JobCompanyLink.job_profile_id == profile_a.id)
+            # 每条画像各自一条关联行（关联表仍记录来源与命中次数）
+            for profile in (profile_a, profile_b):
+                links = list(
+                    (
+                        await session.execute(
+                            select(JobCompanyLink).where(
+                                JobCompanyLink.job_profile_id == profile.id
+                            )
+                        )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            assert len(links) == 2
+                assert len(links) == 1
+                assert links[0].company_id == profile.company_id
 
             # 两家公司各自「有多少岗位」都是 1
             for name in ("甲公司X", "乙公司X"):
@@ -307,6 +328,124 @@ class TestJobCompanyLinks:
                 ).scalar_one()
                 assert company.job_count == 1
                 assert await company_job_count(session, company.id) == 1
+
+    async def test_title_normalisation_merges_case_and_whitespace(self):
+        """P2：`java 开发` / `Java 开发` / 前后多空格视为同一个岗位（忽略大小写 + 折叠空白）。"""
+        base = _title("归一化  岗位")  # 双空格
+        tight = _title("归一化 岗位")  # 单空格 → 折叠后同一个 key
+        async with test_session_factory() as session:
+            first, created_first = await upsert_job_profile(
+                session, {"title": base, "company": _company("归一化公司")}
+            )
+            await session.commit()
+            assert created_first is True
+            # 关键不变量：DB 生成列与 Python 归一化**必须给出一致的键**
+            # （三处规则：dedup_keys.normalise_title / job_profiles.title_key 生成列 / apply_ddl.py 的 DDL）
+            assert first.title_key == normalise_title(base)
+            assert first.title_key == normalise_title(tight)
+            assert first.title_key != base  # 生成列确实做了归一化（折叠了双空格）
+
+            for variant in (base.upper(), f"  {base}  ", tight):
+                again, created = await upsert_job_profile(
+                    session, {"title": variant, "company": _company("归一化公司")}
+                )
+                await session.commit()
+                assert created is False, variant
+                assert again.id == first.id, variant
+
+    async def test_company_unknown_profile_is_adopted_by_first_known_company(self):
+        """P2：**公司未知 ≠ 另一家公司**。
+
+        用户的真实路径是"先导职业路线表（无公司列）→ 再导含公司表"。
+        若把"未知公司"当成另一家，同一个岗位会裂成两条（一条永远没有公司）。
+        这里的规则是：含公司数据首次出现时**收养**那条"公司未知"的画像。
+        """
+        title = _title("收养岗位")
+        async with test_session_factory() as session:
+            unknown, created_unknown = await upsert_job_profile(session, {"title": title})
+            await session.commit()
+            assert created_unknown is True and unknown.company_id is None
+
+            adopted, created_adopted = await upsert_job_profile(
+                session, {"title": title, "company": _company("收养公司"), "industry": "互联网"}
+            )
+            await session.commit()
+
+            assert created_adopted is False  # 收养而非新建
+            assert adopted.id == unknown.id
+            assert adopted.company_id is not None
+            assert adopted.industry == "互联网"
+
+            total = (
+                await session.execute(
+                    select(func.count()).select_from(JobProfile).where(JobProfile.title == title)
+                )
+            ).scalar_one()
+            assert total == 1
+
+            # 收养之后再出现第二家公司 → 这时才新建第二条
+            second, created_second = await upsert_job_profile(
+                session, {"title": title, "company": _company("收养公司二")}
+            )
+            await session.commit()
+            assert created_second is True
+            assert second.id != adopted.id
+
+    async def test_unknown_company_row_does_not_fork_existing_profile(self):
+        """P2：已有"带公司"的画像时，再来一行**不带公司**的同名行不应裂出第二条。"""
+        title = _title("不回退岗位")
+        async with test_session_factory() as session:
+            known, created_known = await upsert_job_profile(
+                session, {"title": title, "company": _company("不回退公司")}
+            )
+            await session.commit()
+            assert created_known is True
+
+            again, created_again = await upsert_job_profile(
+                session, {"title": title, "summary": "无公司行的补充摘要"}
+            )
+            await session.commit()
+
+            assert created_again is False
+            assert again.id == known.id
+            assert again.summary == "无公司行的补充摘要"
+            assert again.company_id == known.company_id  # 公司归属不被抹掉
+
+    async def test_unique_index_blocks_manual_duplicate(self):
+        """P2：`(title_key, company_id)` 由 DB 唯一索引兜底 —— 绕过服务层直插也会被拦。"""
+        title = _title("唯一索引岗位")
+        async with test_session_factory() as session:
+            profile, _ = await upsert_job_profile(
+                session, {"title": title, "company": _company("唯一索引公司")}
+            )
+            await session.commit()
+            key = profile.title_key
+
+        async with test_session_factory() as session:
+            with pytest.raises(IntegrityError):
+                await session.execute(
+                    text(
+                        "INSERT INTO job_profiles (title, company_id) VALUES (:t, :c)"
+                    ),
+                    {"t": f"  {title.upper()}  ", "c": profile.company_id},
+                )
+            await session.rollback()
+
+        # NULL 公司也照样唯一（NULLS NOT DISTINCT）
+        async with test_session_factory() as session:
+            await session.execute(
+                text("INSERT INTO job_profiles (title) VALUES (:t)"),
+                {"t": _title("NULL公司唯一")},
+            )
+            await session.commit()
+        async with test_session_factory() as session:
+            with pytest.raises(IntegrityError):
+                await session.execute(
+                    text("INSERT INTO job_profiles (title) VALUES (:t)"),
+                    {"t": _title("null公司唯一").upper()},
+                )
+            await session.rollback()
+        assert key
 
     async def test_link_is_idempotent_and_counts_hits(self):
         title = _title("重复导入")

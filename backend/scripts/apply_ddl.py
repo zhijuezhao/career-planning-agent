@@ -25,7 +25,9 @@
 覆盖范围：计划 §5.1 七张新表（llm_providers / llm_models / llm_routes / companies /
 job_match_records / link_xpath_templates / link_fetch_cache）+ §5.2 六处新列
 （job_profiles.company_id / source_url / enrich_stats、data_import_jobs.stats、users.qq / wechat）
-+ B2-5 的岗位↔公司关联表 `job_company_links`（同一岗位可被多家公司在招）。
++ B2-5 的岗位↔公司关联表 `job_company_links`（同一岗位可被多家公司在招）
++ P2 的岗位去重粒度（§17）：`job_profiles.title_key` 生成列 + `uq_job_profiles_title_company`
+唯一索引 `(title_key, company_id) NULLS NOT DISTINCT`。
 
 数据库地址优先级：--database-url > 环境变量 DATABASE_URL > backend/.env（get_settings()）> 内置默认值。
 Windows 控制台若中文乱码，先执行: chcp 65001
@@ -256,6 +258,17 @@ COLUMN_SPECS: tuple[ColumnSpec, ...] = (
         "wechat",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS wechat VARCHAR(50)",
     ),
+    # P2（2026-09-26）：岗位去重粒度改 (归一化岗位名, 公司)。
+    # 用**生成列**而不是"表达式唯一索引"，原因：表达式索引要求查询里的表达式
+    # 与索引定义**逐字相同**，而应用侧一律走绑定参数（`regexp_replace(title, $1, $2, $3)`），
+    # 规划器无法把它匹配到带字面量的索引表达式 → 有时用不上索引。生成列则是一个普通列，
+    # 查询直接 `title_key = $1`，既能用索引，也保证 Python 与 SQL 的归一化规则一致。
+    ColumnSpec(
+        "job_profiles",
+        "title_key",
+        "ALTER TABLE job_profiles ADD COLUMN IF NOT EXISTS title_key VARCHAR(200) "
+        "GENERATED ALWAYS AS (lower(regexp_replace(btrim(title), '\\s+', ' ', 'g'))) STORED",
+    ),
 )
 
 CONSTRAINT_SPECS: tuple[ConstraintSpec, ...] = (
@@ -302,6 +315,14 @@ INDEX_SPECS: tuple[IndexSpec, ...] = (
     IndexSpec(
         "ix_job_company_links_company_id",
         "CREATE INDEX IF NOT EXISTS ix_job_company_links_company_id ON job_company_links (company_id)",
+    ),
+    # P2：岗位去重的**最终权威**。`NULLS NOT DISTINCT`（PG15+，本机 PG17）让
+    # `(同名, NULL)` 也算冲突 —— 否则"没有公司列"的表会在 PG 默认的 NULL 语义下
+    # 完全绕过唯一性，重复插入无人拦。
+    IndexSpec(
+        "uq_job_profiles_title_company",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_job_profiles_title_company "
+        "ON job_profiles (title_key, company_id) NULLS NOT DISTINCT",
     ),
 )
 
