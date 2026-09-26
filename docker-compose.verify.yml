@@ -1,0 +1,51 @@
+# 干净验收栈（与主 docker-compose.yml 叠加使用，**不修改原文件**）
+#
+# 背景：dev 后端 career_backend 挂的是宿主机 ./backend（bind mount）+ `--reload`，
+# 于是工作区里**他人未提交的改动**也会被跑起来 —— 那种状态下做的"线上验收"是在
+# 混合态运行时里做的，证据不干净（2026-09-25 发现）。
+#
+# 本文件起一个**只挂已提交代码**的第二后端：
+#   * 源码来自 scripts/verify-export.ps1 从 git HEAD 导出的 .verify-src/backend
+#   * 无 --reload（代码是冻结的，不会被人改工作区而漂移）
+#   * 宿主端口 8012（dev 栈仍是 8002；nginx 仍是 80）
+#   * 复用同一套 postgres / redis（同一个 compose 项目与网络）
+#   * cwd 仍是 /app/backend → settings.upload_dir=./uploads 落在 .verify-src 内，
+#     与真实 uploads 隔离（顺带能验证"文件路径"这类副作用）
+#
+# 用法：
+#   pwsh scripts/verify-export.ps1                     # 纯 HEAD
+#   pwsh scripts/verify-export.ps1 -IncludeDirty backend/app/api/v1/chat.py
+#   docker compose -f docker-compose.yml -f docker-compose.verify.yml up -d verify-backend
+#   curl.exe -s http://localhost:8012/docs
+#   docker compose -f docker-compose.yml -f docker-compose.verify.yml logs -f verify-backend
+#   docker compose -f docker-compose.yml -f docker-compose.verify.yml rm -sf verify-backend
+services:
+  verify-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    # 独立镜像名：**不会覆盖** dev 后端镜像
+    image: studentjobagent-backend:verify
+    container_name: career_backend_verify
+    restart: "no"
+    # 与 dev 一致：Windows 文件共享下非 root 无法写 ./logs
+    user: "root"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/career_planning
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8012:8001"
+    volumes:
+      # 只挂导出树；注意这里是**读写**（应用要写 logs/、uploads/），
+      # 但写的都是 .verify-src 内的副本，不碰真实 backend/
+      - ./.verify-src/backend:/app/backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # 注意：**没有 --reload** —— 验收栈要的是"冻结的已提交代码"
+    command: >
+      sh -c "cd /app/backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8001"

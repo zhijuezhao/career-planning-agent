@@ -38,3 +38,9 @@ Thumbs.db
 
 # Poetry
 poetry.lock
+
+# 干净验收栈（由 scripts/verify-export.ps1 生成，见 docker-compose.verify.yml）
+# 背景：dev 后端是 bind mount + --reload，会把**未提交的他人改动**一起跑起来；
+# 验收需要"只含已提交代码"的运行时，故单独导出一份到 .verify-src/
+.verify-src/
+.verify-src.tar
