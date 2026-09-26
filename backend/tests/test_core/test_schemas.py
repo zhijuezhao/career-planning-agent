@@ -1,40 +1,34 @@
 """Tests for all Pydantic schemas — validation and constraints."""
 
+
 import pytest
-from datetime import datetime
-from pydantic import ValidationError
-
-pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6")
-
-from app.schemas.user import (
-    UserRegister,
-    UserLogin,
-    TokenResponse,
-    UserResponse,
-    UserUpdate,
-)
 from app.schemas.admin import (
     AdminUserUpdate,
-    AdminUserResponse,
+    DimensionWeightCreate,
     JobProfileCreate,
     JobProfileUpdate,
-    DimensionWeightCreate,
-    DimensionWeightUpdate,
-    AIConfigCreate,
-    AIConfigUpdate,
 )
-from app.schemas.chat import ChatSessionCreate, ChatRequest
+from app.schemas.chat import ChatRequest
+from app.schemas.user import (
+    UserLogin,
+    UserRegister,
+)
+from pydantic import ValidationError
+
 try:
-    from app.schemas.matching import MatchRunRequest, FeedbackCreateRequest
+    from app.schemas.matching import FeedbackCreateRequest, MatchRunRequest
 except ImportError:  # pragma: no cover
     MatchRunRequest = None
     FeedbackCreateRequest = None
 from app.schemas.reports import ReportGenerateRequest
+
 try:
     from app.schemas.career import CareerPathRequest, GrowthPlanRequest
 except ImportError:  # pragma: no cover - schemas/career.py 已随 S3 摘除
     CareerPathRequest = None
     GrowthPlanRequest = None
+
+pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6")
 
 
 class TestUserRegisterSchema:
@@ -175,64 +169,6 @@ class TestDimensionWeightCreateSchema:
                 top_dimension="专业能力",
                 weight=1.5,
             )
-
-
-class TestAIConfigCreateSchema:
-    def test_valid_config(self):
-        schema = AIConfigCreate(
-            function_key="resume_parsing",
-            provider="deepseek",
-            model_name="deepseek-chat",
-        )
-        assert schema.function_key == "resume_parsing"
-        assert schema.temperature == 0.7
-        assert schema.max_tokens == 4096
-
-    def test_temperature_boundary(self):
-        schema = AIConfigCreate(
-            function_key="test",
-            provider="test",
-            model_name="test",
-            temperature=0.0,
-        )
-        assert schema.temperature == 0.0
-
-        schema = AIConfigCreate(
-            function_key="test",
-            provider="test",
-            model_name="test",
-            temperature=2.0,
-        )
-        assert schema.temperature == 2.0
-
-    def test_temperature_out_of_range(self):
-        with pytest.raises(ValidationError):
-            AIConfigCreate(
-                function_key="test",
-                provider="test",
-                model_name="test",
-                temperature=3.0,
-            )
-
-    def test_max_tokens_out_of_range(self):
-        with pytest.raises(ValidationError):
-            AIConfigCreate(
-                function_key="test",
-                provider="test",
-                model_name="test",
-                max_tokens=0,
-            )
-
-
-class TestAIConfigUpdateSchema:
-    def test_empty_update(self):
-        schema = AIConfigUpdate()
-        assert schema.provider is None
-        assert schema.is_active is None
-
-    def test_partial_update(self):
-        schema = AIConfigUpdate(is_active=True)
-        assert schema.is_active is True
 
 
 class TestChatRequestSchema:

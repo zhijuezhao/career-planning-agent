@@ -19,7 +19,8 @@ async def test_all_tables_exist():
     expected_tables = {
         "users", "ability_profiles", "job_profiles", "job_raw_data",
         "chat_sessions", "chat_messages", "job_matches", "user_feedbacks",
-        "growth_paths", "growth_plans", "career_reports", "ai_configs",
+        "growth_paths", "growth_plans", "career_reports",
+        # 2026-09-26：移除 `ai_configs`（旧版配置；接口/模型/表一并删除）
         "job_match_embeddings", "career_knowledge",
         "resumes", "user_match_embeddings",
         "dimension_scores", "dimension_weights",
@@ -105,7 +106,6 @@ async def test_dimension_weights_unique_constraint():
 def test_all_models_importable():
     from app.domain.models import (
         AbilityProfile,
-        AIConfig,
         CareerKnowledge,
         CareerReport,
         ChatMessage,
@@ -126,12 +126,13 @@ def test_all_models_importable():
     models = [
         User, AbilityProfile, JobProfile, JobRawData,
         ChatSession, ChatMessage, JobMatch, UserFeedback,
-        GrowthPath, GrowthPlan, CareerReport, AIConfig,
+        GrowthPath, GrowthPlan, CareerReport,
         JobMatchEmbedding, CareerKnowledge,
         Resume, UserMatchEmbedding,
         DimensionScore, DimensionWeight,
     ]
-    assert len(models) == 18
+    # 17 个：2026-09-26 移除了 `AIConfig`（旧 ai_configs 表连同模型一并删除）
+    assert len(models) == 17
     for m in models:
         assert hasattr(m, "__tablename__")
 

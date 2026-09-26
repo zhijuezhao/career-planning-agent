@@ -309,47 +309,6 @@ class ChatMessageListResponse(BaseModel):
     items: list[ChatMessageResponse]
 
 
-# ── System Config Admin Schemas ─────────────────────────────────────────────
-
-class AIConfigResponse(BaseModel):
-    id: int
-    function_key: str
-    provider: str
-    model_name: str
-    base_url: str | None
-    temperature: float
-    max_tokens: int
-    is_active: bool
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class AIConfigCreate(BaseModel):
-    function_key: str = Field(..., min_length=1, max_length=50)
-    provider: str = Field(..., min_length=1, max_length=50)
-    model_name: str = Field(..., min_length=1, max_length=100)
-    base_url: str | None = Field(None, max_length=500)
-    api_key: str | None = Field(None, max_length=500)
-    temperature: float = Field(0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(4096, ge=1, le=100000)
-
-
-class AIConfigUpdate(BaseModel):
-    provider: str | None = Field(None, max_length=50)
-    model_name: str | None = Field(None, max_length=100)
-    base_url: str | None = Field(None, max_length=500)
-    api_key: str | None = Field(None, max_length=500)
-    temperature: float | None = Field(None, ge=0.0, le=2.0)
-    max_tokens: int | None = Field(None, ge=1, le=100000)
-    is_active: bool | None = None
-
-
-class AIConfigListResponse(BaseModel):
-    total: int
-    items: list[AIConfigResponse]
-
-
 # ── Dashboard Stats Schemas ─────────────────────────────────────────────────
 
 class DashboardOverview(BaseModel):
