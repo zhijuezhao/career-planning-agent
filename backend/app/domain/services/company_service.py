@@ -12,12 +12,13 @@ B2-5 起新增 `job_company_links`（岗位 ↔ 公司 多对多）：
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models.company import Company
-from app.domain.models.job import JobProfile
 from app.domain.models.job_company_link import JobCompanyLink
 
 # 明显不是公司名的占位值（导入表里常见）
@@ -168,7 +169,48 @@ async def sync_all_job_counts(session: AsyncSession) -> int:
     return len(companies)
 
 
+def aggregate_geo_options(pairs: Iterable[tuple[str | None, str | None]]) -> dict[str, object]:
+    """把 `(省, 市)` 明细汇总成**省 → 市 级联下拉**要的三份数据（纯函数，无 IO）。
+
+    返回 `{"regions": [...], "cities_by_region": {省: [市...]}, "all_cities": [...]}`，
+    三份都是**排序去重**的（排序在前端表现为稳定的下拉顺序，省得前端再排一遍）。
+
+    - `regions`：有省的 distinct 省；
+    - `cities_by_region`：省 → 该省的市；
+    - `all_cities`：全部市 —— 含"只写了市、没写省"的行，否则这些行在当前筛选器里
+      **永远筛不到**（选中它们的省是做不到的，因为压根没有省）。
+
+    ⚠️ 刻意**不编造**地域：库里没有就返回三个空值，由前端空着显示
+    （`companies` / `job_company_links` 现在都还是 0 行，这条路径就是空库的真实形态）。
+
+    放在服务层但**不 import schemas**：返回普通 dict，由接口侧包成 `GeoOptionsResponse`，
+    免得领域层反向依赖接口契约。
+    """
+    regions: set[str] = set()
+    cities_by_region: dict[str, set[str]] = {}
+    all_cities: set[str] = set()
+
+    for raw_region, raw_city in pairs:
+        region = str(raw_region).strip() if raw_region is not None else ""
+        city = str(raw_city).strip() if raw_city is not None else ""
+        if region:
+            regions.add(region)
+        if city:
+            all_cities.add(city)
+            if region:
+                cities_by_region.setdefault(region, set()).add(city)
+
+    return {
+        "regions": sorted(regions),
+        "cities_by_region": {
+            region: sorted(cities) for region, cities in sorted(cities_by_region.items())
+        },
+        "all_cities": sorted(all_cities),
+    }
+
+
 __all__ = [
+    "aggregate_geo_options",
     "company_job_count",
     "link_job_company",
     "normalise_company_name",

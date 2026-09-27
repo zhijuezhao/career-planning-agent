@@ -3,13 +3,18 @@
  * 公司导航（B2-2，需求 3）
  *
  * 公司不是手工维护的：导入/落库时按「公司名」幂等 upsert，`job_count` 由后端按
- * `job_profiles.company_id` 实算。本页只做导航 + 人工修正：
- * - 列表：按岗位数倒序（先看到主要雇主），支持名称搜索 / 行业 / 城市 / 只看有岗位
+ * `job_company_links` 实算（任务 3 起 `job_profiles.company_id` 已删除）。
+ * 本页只做导航 + 人工修正：
+ * - 列表：按岗位数倒序（先看到主要雇主），支持名称搜索 / 行业 / **省→市级联** / 只看有岗位
  * - 详情：公司信息 + 该公司岗位（可直接跳到「岗位管理」按公司筛选）
- * - 修正：改公司名/行业/城市；「重算岗位数」对应 POST /companies/sync
- * - 删除：只删公司行，**岗位不受影响**（外键 ON DELETE SET NULL，只解绑）
+ * - 修正：改公司名/行业/**规模/省/市**；「重算岗位数」对应 POST /companies/sync
+ * - 删除：只删公司行，**岗位不受影响**（关联行随公司级联删除，岗位本身保留）
+ *
+ * 任务 4（2026-09-27）：规模与省/市是新增字段；地域用**省→市级联下拉**，
+ * 选项来自 `GET /companies/geo-options`（库里真实存在的 distinct 值）。
+ * 空库时那三个列表都是空的 → 下拉空着显示，**不硬编码任何省份表**。
  */
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { get, post, put, remove } from '@/api/request'
@@ -19,10 +24,19 @@ interface Company {
   id: number
   name: string
   industry: string | null
+  scale: string | null
+  region: string | null
   city: string | null
   job_count: number
   created_at: string
   updated_at: string
+}
+
+/** 省 → 市级联下拉的数据源（选项是库里真实存在的值，可能是空的） */
+interface GeoOptions {
+  regions: string[]
+  cities_by_region: Record<string, string[]>
+  all_cities: string[]
 }
 
 interface CompanyJob {
@@ -50,10 +64,36 @@ const query = reactive({
   limit: 20,
   q: '',
   industry: '',
+  region: '',
   city: '',
   only_with_jobs: false,
   sort: 'job_count' as 'job_count' | 'name' | 'created_at',
 })
+
+// ── 省 → 市级联（任务 4）────────────────────────────────────────────────────
+// 选项来自后端 distinct 值；未选省时「市」给全部市（含"只写了市没写省"的行，
+// 否则那些公司在当前筛选器里永远筛不到）。
+const geoOptions = ref<GeoOptions>({ regions: [], cities_by_region: {}, all_cities: [] })
+
+const cityOptions = computed(() =>
+  query.region
+    ? (geoOptions.value.cities_by_region[query.region] ?? [])
+    : geoOptions.value.all_cities,
+)
+
+const loadGeoOptions = async () => {
+  try {
+    geoOptions.value = await get<GeoOptions>('/v1/admin/companies/geo-options')
+  } catch {
+    // error handled by interceptor
+  }
+}
+
+const handleRegionChange = () => {
+  // 换了省之后，原来的市可能不属于新省 → 清掉，免得出现"空结果但筛选器看着有值"
+  if (query.city && !cityOptions.value.includes(query.city)) query.city = ''
+  handleSearch()
+}
 
 const fetchData = async () => {
   loading.value = true
@@ -65,6 +105,7 @@ const fetchData = async () => {
     }
     if (query.q) params.q = query.q
     if (query.industry) params.industry = query.industry
+    if (query.region) params.region = query.region
     if (query.city) params.city = query.city
     if (query.only_with_jobs) params.only_with_jobs = true
 
@@ -110,12 +151,14 @@ const goJobs = (companyId: number) => {
 const editVisible = ref(false)
 const saving = ref(false)
 const editingId = ref<number | null>(null)
-const editForm = reactive({ name: '', industry: '', city: '' })
+const editForm = reactive({ name: '', industry: '', scale: '', region: '', city: '' })
 
 const openEdit = (row: Company) => {
   editingId.value = row.id
   editForm.name = row.name
   editForm.industry = row.industry ?? ''
+  editForm.scale = row.scale ?? ''
+  editForm.region = row.region ?? ''
   editForm.city = row.city ?? ''
   editVisible.value = true
 }
@@ -127,10 +170,14 @@ const submitEdit = async () => {
     await put(`/v1/admin/companies/${editingId.value}`, {
       name: editForm.name,
       industry: editForm.industry || null,
+      scale: editForm.scale || null,
+      region: editForm.region || null,
       city: editForm.city || null,
     })
     ElMessage.success('已保存')
     editVisible.value = false
+    // 省/市/规模可能变了 → 级联选项跟着更新
+    await loadGeoOptions()
     await fetchData()
   } catch {
     // error handled by interceptor
@@ -173,7 +220,10 @@ const handleDelete = async (row: Company) => {
   }
 }
 
-onMounted(fetchData)
+onMounted(async () => {
+  await loadGeoOptions()
+  await fetchData()
+})
 </script>
 
 <template>
@@ -197,7 +247,27 @@ onMounted(fetchData)
           @keyup.enter="handleSearch"
         />
         <el-input v-model="query.industry" placeholder="行业" style="width: 140px" clearable />
-        <el-input v-model="query.city" placeholder="城市" style="width: 120px" clearable />
+        <!-- 省 → 市级联（任务 4）：选中省后「市」的选项收敛到该省的市 -->
+        <el-select
+          v-model="query.region"
+          placeholder="全部省份"
+          style="width: 140px"
+          clearable
+          filterable
+          @change="handleRegionChange"
+        >
+          <el-option v-for="r in geoOptions.regions" :key="r" :label="r" :value="r" />
+        </el-select>
+        <el-select
+          v-model="query.city"
+          placeholder="全部城市"
+          style="width: 140px"
+          clearable
+          filterable
+          @change="handleSearch"
+        >
+          <el-option v-for="c in cityOptions" :key="c" :label="c" :value="c" />
+        </el-select>
         <el-checkbox v-model="query.only_with_jobs" @change="handleSearch">只看有岗位</el-checkbox>
         <el-select v-model="query.sort" style="width: 150px" @change="handleSearch">
           <el-option label="按岗位数" value="job_count" />
@@ -213,6 +283,12 @@ onMounted(fetchData)
         <el-table-column prop="name" label="公司名" min-width="240" show-overflow-tooltip />
         <el-table-column label="行业" width="140">
           <template #default="{ row }">{{ row.industry || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="规模" width="130">
+          <template #default="{ row }">{{ row.scale || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="省份" width="100">
+          <template #default="{ row }">{{ row.region || '-' }}</template>
         </el-table-column>
         <el-table-column label="城市" width="110">
           <template #default="{ row }">{{ row.city || '-' }}</template>
@@ -251,6 +327,8 @@ onMounted(fetchData)
         <el-descriptions v-if="detail" :column="1" border size="small">
           <el-descriptions-item label="公司名">{{ detail.name }}</el-descriptions-item>
           <el-descriptions-item label="行业">{{ detail.industry || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="规模">{{ detail.scale || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="省份">{{ detail.region || '-' }}</el-descriptions-item>
           <el-descriptions-item label="城市">{{ detail.city || '-' }}</el-descriptions-item>
           <el-descriptions-item label="岗位数">{{ detail.job_count }}</el-descriptions-item>
           <el-descriptions-item label="首次入库">
@@ -286,8 +364,14 @@ onMounted(fetchData)
         <el-form-item label="行业">
           <el-input v-model="editForm.industry" placeholder="如：互联网" maxlength="100" />
         </el-form-item>
+        <el-form-item label="规模">
+          <el-input v-model="editForm.scale" placeholder="如：1000-9999人" maxlength="50" />
+        </el-form-item>
+        <el-form-item label="省份">
+          <el-input v-model="editForm.region" placeholder="如：广东（不带「省」后缀）" maxlength="50" />
+        </el-form-item>
         <el-form-item label="城市">
-          <el-input v-model="editForm.city" placeholder="如：北京" maxlength="50" />
+          <el-input v-model="editForm.city" placeholder="如：深圳" maxlength="50" />
         </el-form-item>
       </el-form>
       <template #footer>

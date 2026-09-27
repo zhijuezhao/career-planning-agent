@@ -545,6 +545,10 @@ class CompanyResponse(BaseModel):
     id: int
     name: str
     industry: str | None
+    # 任务 4（2026-09-27）：公司规模 / 省份。规模存**原文**（如 `1000-9999人`），
+    # 省与 `city` 组成省市两级（管理端「先选省、再选市」的级联筛选）。
+    scale: str | None = None
+    region: str | None = None
     city: str | None
     job_count: int
     created_at: datetime
@@ -557,7 +561,26 @@ class CompanyUpdate(BaseModel):
     """人工修正公司信息（导入自动识别的值可改）。全部可选，不传=不改。"""
     name: str | None = Field(None, min_length=1, max_length=200)
     industry: str | None = Field(None, max_length=100)
+    scale: str | None = Field(None, max_length=50)
+    region: str | None = Field(None, max_length=50)
     city: str | None = Field(None, max_length=50)
+
+
+class GeoOptionsResponse(BaseModel):
+    """**省 → 市 级联下拉**的数据源（任务 4）。
+
+    取的是库里真实存在的 distinct 值（公司所在地或招聘所在地），
+    所以**没有数据的库会返回三个空值** —— 前端必须能优雅地空着显示，
+    而不是列出编造的地域。
+
+    - `regions`：有省的 distinct 省；
+    - `cities_by_region`：省 → 该省的市（选中省后用它收敛「市」的选项）；
+    - `all_cities`：全部市（未选省时用；含"只写了市、没写省"的行，避免它们筛不到）。
+    """
+
+    regions: list[str] = []
+    cities_by_region: dict[str, list[str]] = {}
+    all_cities: list[str] = []
 
 
 class CompanyJobSummary(BaseModel):

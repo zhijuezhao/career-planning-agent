@@ -32,21 +32,32 @@ interface JobItem {
   career_path: unknown
   transition_paths: unknown
   outlook: unknown
-  company_id: number | null
   company_name: string | null
   company_count: number
   created_at: string
   updated_at: string
 }
 
+/** 一条在招关联 = **一次招聘**（任务 2 起岗位↔公司多对多；任务 4 接上招聘级字段） */
 interface JobCompanyLink {
   company_id: number
   company_name: string
   industry: string | null
+  scale: string | null
+  region: string | null
   city: string | null
+  salary: string | null
+  source_url: string | null
   hit_count: number
   last_seen_at: string | null
   is_primary: boolean
+}
+
+/** 省 → 市级联下拉的数据源（选项是库里真实存在的值，可能是空的） */
+interface GeoOptions {
+  regions: string[]
+  cities_by_region: Record<string, string[]>
+  all_cities: string[]
 }
 
 interface CompanyOption {
@@ -75,7 +86,34 @@ const query = reactive({
   industry: '',
   level: '',
   company_id: initialCompanyId as number | undefined,
+  region: '',
+  city: '',
 })
+
+// ── 省 → 市级联（任务 4）────────────────────────────────────────────────────
+// 口径 = **招聘所在地**（关联行自带的地域优先，缺失回落公司所在地），与后端筛选、
+// 与详情「在招公司」三处一致。选项来自 `GET /jobs/geo-options`；空库 → 空下拉。
+const geoOptions = ref<GeoOptions>({ regions: [], cities_by_region: {}, all_cities: [] })
+
+const cityOptions = computed(() =>
+  query.region
+    ? (geoOptions.value.cities_by_region[query.region] ?? [])
+    : geoOptions.value.all_cities,
+)
+
+const loadGeoOptions = async () => {
+  try {
+    geoOptions.value = await get<GeoOptions>('/v1/admin/jobs/geo-options')
+  } catch {
+    // error handled by interceptor
+  }
+}
+
+const handleRegionChange = () => {
+  // 换了省之后，原来的市可能不属于新省 → 清掉，免得出现"空结果但筛选器看着有值"
+  if (query.city && !cityOptions.value.includes(query.city)) query.city = ''
+  handleSearch()
+}
 
 const form = reactive({
   title: '',
@@ -137,6 +175,8 @@ const fetchData = async () => {
     if (query.industry) params.industry = query.industry
     if (query.level) params.level = query.level
     if (query.company_id) params.company_id = query.company_id
+    if (query.region) params.region = query.region
+    if (query.city) params.city = query.city
     const res = await get<{ items: JobItem[]; total: number }>('/v1/admin/jobs', { params })
     tableData.value = res.items
     total.value = res.total
@@ -270,6 +310,7 @@ const openPortrait = (row: JobItem, section: PortraitSection) => {
 
 onMounted(async () => {
   await fetchCompanies()
+  await loadGeoOptions()
   await fetchData()
 })
 </script>
@@ -295,6 +336,27 @@ onMounted(async () => {
         </el-select>
         <el-input v-model="query.industry" placeholder="行业" style="width: 150px" clearable />
         <el-input v-model="query.level" placeholder="级别" style="width: 150px" clearable />
+        <!-- 省 → 市级联（任务 4，按招聘所在地；选中省后「市」的选项收敛到该省的市） -->
+        <el-select
+          v-model="query.region"
+          placeholder="全部省份"
+          style="width: 140px"
+          clearable
+          filterable
+          @change="handleRegionChange"
+        >
+          <el-option v-for="r in geoOptions.regions" :key="r" :label="r" :value="r" />
+        </el-select>
+        <el-select
+          v-model="query.city"
+          placeholder="全部城市"
+          style="width: 140px"
+          clearable
+          filterable
+          @change="handleSearch"
+        >
+          <el-option v-for="c in cityOptions" :key="c" :label="c" :value="c" />
+        </el-select>
         <el-button type="primary" @click="handleSearch">搜索</el-button>
         <el-button type="success" @click="handleCreate">新建</el-button>
       </div>
@@ -411,19 +473,42 @@ onMounted(async () => {
       width="800px"
     />
 
-    <el-dialog v-model="linkVisible" :title="linkTitle" width="720px">
+    <el-dialog v-model="linkVisible" :title="linkTitle" width="880px">
       <el-table v-loading="linkLoading" :data="linkRows" size="small" stripe>
-        <el-table-column label="公司" min-width="200" show-overflow-tooltip>
+        <el-table-column label="公司" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.company_name }}
-            <el-tag v-if="row.is_primary" size="small" type="success" class="primary-tag">主公司</el-tag>
+            <el-tag v-if="row.is_primary" size="small" type="success" class="primary-tag">最早</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="行业" width="120">
+        <el-table-column label="行业" width="110">
           <template #default="{ row }">{{ row.industry || '-' }}</template>
         </el-table-column>
-        <el-table-column label="城市" width="100">
+        <el-table-column label="规模" width="120">
+          <template #default="{ row }">{{ row.scale || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="省份" width="90">
+          <template #default="{ row }">{{ row.region || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="城市" width="90">
           <template #default="{ row }">{{ row.city || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="薪资" width="110">
+          <template #default="{ row }">{{ row.salary || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="招聘链接" width="110">
+          <template #default="{ row }">
+            <el-link
+              v-if="row.source_url"
+              type="primary"
+              :href="row.source_url"
+              target="_blank"
+              rel="noopener"
+            >
+              打开
+            </el-link>
+            <span v-else>-</span>
+          </template>
         </el-table-column>
         <el-table-column label="出现次数" width="90">
           <template #default="{ row }">{{ row.hit_count }}</template>

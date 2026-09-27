@@ -468,3 +468,139 @@ class TestJobsFilterByCompany:
         resp = client.get("/api/v1/admin/jobs", params={"limit": 1}, headers=_headers(admin_token))
         assert resp.status_code == 200
         assert "items" in resp.json()
+
+
+# ── 任务 4（2026-09-27）：公司规模/省市 + 省→市级联（公司所在地口径）──────────────
+
+_GEO_SCOPE = ("青海", "西藏")  # 与其它用例的地域不重叠，便于精确断言
+
+
+async def _seed_geo_companies() -> dict[str, int]:
+    """四家带规模/省市的公司（用别处不用的地名，断言才敢写死）。
+
+    - `青海甲`：规模 + 省 + 市齐全；
+    - `西藏乙`：规模 + 省 + 市齐全；
+    - `无省丙`：**有市无省** —— 这种行必须能被筛到（靠 `all_cities`），
+      否则它在"先选省"的级联里就是个筛不到的孤岛；
+    - `待改丁`：规模/省/市**全空**，专供 PUT 用例 —— 不拿上面几家做修改，
+      否则会污染 `test_geo_options_cascade_shape` 对级联数据的断言（测试之间不能互相踩）。
+    """
+    async with test_session_factory() as session:
+        for name, scale, region, city in (
+            ("青海甲", "1000-9999人", "青海", "西宁"),
+            ("西藏乙", "100-499人", "西藏", "拉萨"),
+            ("无省丙", "20-99人", None, "日喀则"),
+            ("待改丁", None, None, None),
+        ):
+            await upsert_job_profile(
+                session,
+                {
+                    "title": _title(f"geo{name}"),
+                    "company": _company(f"geo{name}"),
+                    "region": region,
+                    "city": city,
+                    "scale": scale,
+                },
+            )
+        await session.commit()
+
+        rows = (
+            await session.execute(
+                text("SELECT id, name FROM companies WHERE name LIKE :p"),
+                {"p": f"{_PREFIX}_geo%"},
+            )
+        ).all()
+        return {row[1]: row[0] for row in rows}
+
+
+@pytest.fixture(scope="module")
+def geo_companies() -> dict[str, int]:
+    return asyncio.run(_seed_geo_companies())
+
+
+class TestCompanyScaleRegionAPI:
+    """任务 4：`CompanyResponse/CompanyUpdate` 的 `scale`/`region` + 地域筛选。"""
+
+    def test_list_exposes_scale_and_region(self, client: TestClient, admin_token: str, geo_companies):
+        resp = client.get(
+            "/api/v1/admin/companies",
+            params={"region": "青海", "limit": 100},
+            headers=_headers(admin_token),
+        )
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        ours = [c for c in items if c["name"] == _company("geo青海甲")]
+        assert len(ours) == 1, f"按省筛选没命中目标公司：{[c['name'] for c in items]}"
+        assert ours[0]["scale"] == "1000-9999人"
+        assert ours[0]["region"] == "青海"
+        assert ours[0]["city"] == "西宁"
+
+    def test_region_and_city_filters_compose(self, client: TestClient, admin_token: str, geo_companies):
+        """省 → 市级联：选中省后加市继续收窄；省市不匹配就是空。"""
+        hit = client.get(
+            "/api/v1/admin/companies",
+            params={"region": "青海", "city": "西宁", "limit": 100},
+            headers=_headers(admin_token),
+        )
+        assert hit.status_code == 200
+        names = [c["name"] for c in hit.json()["items"]]
+        assert _company("geo青海甲") in names
+
+        miss = client.get(
+            "/api/v1/admin/companies",
+            params={"region": "青海", "city": "拉萨", "limit": 100},
+            headers=_headers(admin_token),
+        )
+        assert miss.json()["total"] == 0
+
+    def test_update_sets_scale_and_region(self, client: TestClient, admin_token: str, geo_companies):
+        """人工修正能写规模/省/市（导入识别的值可能不准）。
+
+        用 `待改丁`（规模/省/市全空）—— 不碰上面那几家，避免污染级联数据源的断言。
+        """
+        company_id = geo_companies[_company("geo待改丁")]
+        resp = client.put(
+            f"/api/v1/admin/companies/{company_id}",
+            json={"scale": "500-999人", "region": "甘肃", "city": "兰州"},
+            headers=_headers(admin_token),
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert (data["scale"], data["region"], data["city"]) == ("500-999人", "甘肃", "兰州")
+
+        # 落库为真（再查一次详情，不靠 PUT 的响应回显）
+        detail = client.get(
+            f"/api/v1/admin/companies/{company_id}", headers=_headers(admin_token)
+        ).json()
+        assert (detail["scale"], detail["region"], detail["city"]) == ("500-999人", "甘肃", "兰州")
+
+    def test_geo_options_cascade_shape(self, client: TestClient, admin_token: str, geo_companies):
+        """级联数据源：省列表 / 省→市收敛 / 全部市（含"有市无省"）。"""
+        resp = client.get("/api/v1/admin/companies/geo-options", headers=_headers(admin_token))
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert set(data) == {"regions", "cities_by_region", "all_cities"}
+
+        assert set(_GEO_SCOPE) <= set(data["regions"])
+        assert "西宁" in data["cities_by_region"]["青海"]
+        assert "日喀则" in data["all_cities"]
+        # 「有市无省」的行不能出现在任何省的市列表里（它没有省可挂）
+        assert "日喀则" not in [c for cities in data["cities_by_region"].values() for c in cities]
+
+    def test_geo_options_not_shadowed_by_company_id_route(self, client: TestClient, admin_token: str):
+        """`/companies/geo-options` 必须命中自己的路由，而不是被 `/{company_id}` 吃掉（422）。"""
+        resp = client.get("/api/v1/admin/companies/geo-options", headers=_headers(admin_token))
+        assert resp.status_code == 200, f"路由被 /{{company_id}} 抢走了：{resp.status_code} {resp.text}"
+
+    def test_no_create_company_endpoint(self, client: TestClient, admin_token: str):
+        """**刻意没有"新建公司"**：公司是导入的副产品，管理端只修正/删除。
+
+        钉住这个设计决定 —— 哪天有人顺手加了 POST，这条会红，提醒他先想清楚
+        "手工建的公司" 与 "导入 upsert 的同名公司" 如何不打架。
+        """
+        resp = client.post(
+            "/api/v1/admin/companies",
+            json={"name": _company("手工新建")},
+            headers=_headers(admin_token),
+        )
+        assert resp.status_code == 405, resp.text

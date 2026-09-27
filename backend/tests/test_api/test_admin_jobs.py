@@ -3,9 +3,10 @@ import time
 
 import pytest
 from app.domain.models.vector import JobMatchEmbedding
+from app.domain.services.job_persist_service import upsert_job_profile
 from app.main import app
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from tests.conftest import test_session_factory
 
 _ts = str(int(time.time()))
@@ -234,3 +235,175 @@ class TestJobsAPI:
         )
         assert ok.status_code == 200, ok.text
         assert ok.json()["level"] == "高级"
+
+
+# ── 任务 4（2026-09-27）：岗位的地域筛选（**招聘所在地**口径，缺失回落公司）────────
+
+_GEO_PREFIX = f"t4geo_{_ts}"
+
+
+def _geo(name: str) -> str:
+    return f"{_GEO_PREFIX}_{name}"
+
+
+async def _geo_cleanup() -> None:
+    async with test_session_factory() as session:
+        await session.execute(
+            text("DELETE FROM job_profiles WHERE title LIKE :p"), {"p": f"{_GEO_PREFIX}%"}
+        )
+        await session.execute(
+            text("DELETE FROM job_raw_data WHERE title LIKE :p"), {"p": f"{_GEO_PREFIX}%"}
+        )
+        await session.execute(
+            text("DELETE FROM companies WHERE name LIKE :p"), {"p": f"{_GEO_PREFIX}%"}
+        )
+        await session.commit()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def clean_t4geo_rows():
+    asyncio.run(_geo_cleanup())
+    yield
+    asyncio.run(_geo_cleanup())
+
+
+async def _seed_geo_jobs() -> dict[str, int]:
+    """三个岗位，覆盖地域筛选的三种数据形态（用别处不用的地名，断言才敢写死）。
+
+    - `链接地域岗`：**关联行自带**招聘所在地（青海/西宁）→ 走 link 口径；
+    - `回落地域岗`：关联行**没有**地域、公司写了（西藏/拉萨）→ 走"回落公司"口径
+      （下面手动把 link 的地域清成 NULL 来模拟这种老数据）；
+    - `多公司地域岗`：**一条岗位、两家公司分别在两个省招**（宁夏/银川 + 新疆/乌鲁木齐）
+      → 两个省都该能筛出**同一条**岗位（多对多：地域算各的）。
+    """
+    async with test_session_factory() as session:
+        job_link, _ = await upsert_job_profile(
+            session,
+            {
+                "title": _geo("链接地域岗"),
+                "company": _geo("链接公司甲"),
+                "region": "青海",
+                "city": "西宁",
+                "salary": "10-15K",
+            },
+        )
+        job_fallback, _ = await upsert_job_profile(
+            session,
+            {
+                "title": _geo("回落地域岗"),
+                "company": _geo("回落公司乙"),
+                "region": "西藏",
+                "city": "拉萨",
+            },
+        )
+        job_multi, _ = await upsert_job_profile(
+            session,
+            {
+                "title": _geo("多公司地域岗"),
+                "company": _geo("多公司甲"),
+                "region": "宁夏",
+                "city": "银川",
+            },
+        )
+        await upsert_job_profile(
+            session,
+            {
+                "title": _geo("多公司地域岗"),
+                "company": _geo("多公司乙"),
+                "region": "新疆",
+                "city": "乌鲁木齐",
+            },
+        )
+        await session.commit()
+
+    # 制造"link 没写地域、公司写了"的老数据形态（入库路径两边都会写，所以要手工清一次）
+    async with test_session_factory() as session:
+        await session.execute(
+            text(
+                "UPDATE job_company_links SET region = NULL, city = NULL "
+                "WHERE job_profile_id = :i"
+            ),
+            {"i": job_fallback.id},
+        )
+        await session.commit()
+
+    return {
+        "link_job": int(job_link.id),
+        "fallback_job": int(job_fallback.id),
+        "multi_job": int(job_multi.id),
+    }
+
+
+@pytest.fixture(scope="module")
+def geo_jobs() -> dict[str, int]:
+    return asyncio.run(_seed_geo_jobs())
+
+
+class TestJobGeoFilterAPI:
+    """任务 4：岗位列表按**招聘所在地**筛，口径与详情「在招公司」逐字一致。"""
+
+    def test_region_filter_matches_link_level(self, client: TestClient, admin_token: str, geo_jobs):
+        resp = client.get(
+            "/api/v1/admin/jobs",
+            params={"region": "青海", "limit": 100},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["id"] == geo_jobs["link_job"]
+
+    def test_region_and_city_filters_compose(self, client: TestClient, admin_token: str, geo_jobs):
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        hit = client.get(
+            "/api/v1/admin/jobs", params={"region": "青海", "city": "西宁"}, headers=headers
+        ).json()
+        assert [i["id"] for i in hit["items"]] == [geo_jobs["link_job"]]
+
+        miss = client.get(
+            "/api/v1/admin/jobs", params={"region": "青海", "city": "拉萨"}, headers=headers
+        ).json()
+        assert miss["total"] == 0
+
+    def test_region_filter_falls_back_to_company(self, client: TestClient, admin_token: str, geo_jobs):
+        """关联行没写地域时回落到**公司所在地** —— 否则这批老数据永远筛不到。"""
+        resp = client.get(
+            "/api/v1/admin/jobs",
+            params={"region": "西藏", "limit": 100},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["id"] == geo_jobs["fallback_job"]
+
+    def test_multi_company_job_matches_both_regions(self, client: TestClient, admin_token: str, geo_jobs):
+        """一条岗位被两家不同省的公司招 → **两个省都筛得到同一条**（多对多的要点）。"""
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        for region, city in (("宁夏", "银川"), ("新疆", "乌鲁木齐")):
+            data = client.get(
+                "/api/v1/admin/jobs", params={"region": region, "city": city}, headers=headers
+            ).json()
+            assert data["total"] == 1, f"{region} 没筛到"
+            assert data["items"][0]["id"] == geo_jobs["multi_job"]
+
+    def test_geo_options_include_link_and_fallback_regions(
+        self, client: TestClient, admin_token: str, geo_jobs
+    ):
+        """级联数据源必须和筛选口径**同源** —— 否则会出现"筛得到却看不到"。"""
+        resp = client.get(
+            "/api/v1/admin/jobs/geo-options",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200, f"路由被 /{{job_id}} 抢走了：{resp.status_code} {resp.text}"
+        data = resp.json()
+        assert set(data) == {"regions", "cities_by_region", "all_cities"}
+
+        # link 口径
+        assert "青海" in data["regions"]
+        assert "西宁" in data["cities_by_region"]["青海"]
+        # 回落口径（公司所在地也得进级联，才与上面的筛选一致）
+        assert "西藏" in data["regions"]
+        assert "拉萨" in data["cities_by_region"]["西藏"]
+        # 多对多：两个省都在
+        assert {"宁夏", "新疆"} <= set(data["regions"])

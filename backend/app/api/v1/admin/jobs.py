@@ -13,9 +13,10 @@ from app.domain.models.job import JobProfile
 from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.models.user import User
 from app.domain.models.vector import JobMatchEmbedding
-from app.domain.services.company_service import refresh_job_count
+from app.domain.services.company_service import aggregate_geo_options, refresh_job_count
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
+    GeoOptionsResponse,
     JobCompanyLinkInfo,
     JobProfileCreate,
     JobProfileDetail,
@@ -86,6 +87,12 @@ async def list_jobs(
     industry: str | None = None,
     level: str | None = None,
     company_id: int | None = Query(None, description="按公司实体筛选（B2-5：走关联表）"),
+    region: str | None = Query(
+        None, description="按**招聘所在地**的省筛选（任务 4；关联行缺失时回落到公司所在省）"
+    ),
+    city: str | None = Query(
+        None, description="按**招聘所在地**的市筛选（任务 4；关联行缺失时回落到公司所在市）"
+    ),
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -106,6 +113,25 @@ async def list_jobs(
         )
         query = query.where(JobProfile.id.in_(linked))
         count_query = count_query.where(JobProfile.id.in_(linked))
+    # 地域筛选（任务 4）：口径与岗位详情的「在招公司」**逐字一致** ——
+    # 关联行自带的地域优先（"这次招聘在哪儿"），缺失才回落到公司所在地。
+    # 用 coalesce 而不是"只认关联行"：否则老数据（关联行没写地域、公司写了）会筛不到。
+    if region:
+        linked = (
+            select(JobCompanyLink.job_profile_id)
+            .join(Company, Company.id == JobCompanyLink.company_id)
+            .where(func.coalesce(JobCompanyLink.region, Company.region) == region)
+        )
+        query = query.where(JobProfile.id.in_(linked))
+        count_query = count_query.where(JobProfile.id.in_(linked))
+    if city:
+        linked = (
+            select(JobCompanyLink.job_profile_id)
+            .join(Company, Company.id == JobCompanyLink.company_id)
+            .where(func.coalesce(JobCompanyLink.city, Company.city) == city)
+        )
+        query = query.where(JobProfile.id.in_(linked))
+        count_query = count_query.where(JobProfile.id.in_(linked))
 
     total = (await db.execute(count_query)).scalar() or 0
 
@@ -119,6 +145,32 @@ async def list_jobs(
         total=total,
         items=[_job_response(j, names.get(j.id), counts.get(j.id, 0)) for j in jobs],
     )
+
+
+# ⚠️ 必须声明在 `/{job_id}` **之前**：否则 "geo-options" 会先被那条 `job_id: int`
+# 的路径吃掉，返回 422 而不是命中这里。
+@router.get("/geo-options", response_model=GeoOptionsResponse)
+async def job_geo_options(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """省 → 市级联下拉的选项（**招聘所在地**口径，任务 4）。
+
+    数据来源是 `job_company_links.region/city` 的 distinct 值，关联行为空时回落到
+    公司所在地 —— 与 `get_job` 里「在招公司」的展示口径、以及上面列表筛选的
+    `coalesce(...)` 口径**三处一致**，否则会出现"筛得到但看不到"的怪现象。
+    """
+    rows = (
+        await db.execute(
+            select(
+                func.coalesce(JobCompanyLink.region, Company.region),
+                func.coalesce(JobCompanyLink.city, Company.city),
+            )
+            .join(Company, Company.id == JobCompanyLink.company_id)
+            .distinct()
+        )
+    ).all()
+    return GeoOptionsResponse(**aggregate_geo_options(rows))
 
 
 @router.get("/{job_id}", response_model=JobProfileDetail)

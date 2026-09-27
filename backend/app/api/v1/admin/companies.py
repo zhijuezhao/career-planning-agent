@@ -1,10 +1,13 @@
-"""公司实体管理（B2-2 / B2-5，需求 3）：公司信息导航。
+"""公司实体管理（B2-2 / B2-5 / 任务 4，需求 3）：公司信息导航。
 
 - 数据来源：导入流水线 persist 阶段 / `db_writer` 工具 / 管理端手工建岗位时
   由 `company_service.upsert_company()` 幂等 upsert；
+  **没有"新建公司"接口**：公司是导入的副产品，管理端只做人工修正（`PUT`）。
 - 岗位↔公司是**多对多**（`job_company_links`，B2-5）：一个岗位可被多家公司招，
   一家公司也可招多个岗位。`job_count` 是冗余列，由关联表重算；
-- `POST /companies/sync`：回填历史关联 + 全量重算 `job_count`；
+- `POST /companies/sync`：全量重算 `job_count`（**只重算，不回填** —— 回填的源列
+  `job_profiles.company_id` 已在任务 3 删除）；
+- `GET /companies/geo-options`（任务 4）：省 → 市级联筛选的数据源（公司所在地）；
 - 删除公司**不会删岗位**：关联行随公司级联删除，岗位本身保留。
 """
 
@@ -19,7 +22,7 @@ from app.domain.models.company import Company
 from app.domain.models.job import JobProfile
 from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.models.user import User
-from app.domain.services.company_service import sync_all_job_counts
+from app.domain.services.company_service import aggregate_geo_options, sync_all_job_counts
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
     CompanyDetail,
@@ -28,6 +31,7 @@ from app.schemas.admin import (
     CompanyResponse,
     CompanySyncResponse,
     CompanyUpdate,
+    GeoOptionsResponse,
 )
 
 router = APIRouter()
@@ -41,6 +45,7 @@ async def list_companies(
     limit: int = Query(20, ge=1, le=100),
     q: str | None = Query(None, description="按公司名模糊搜索"),
     industry: str | None = None,
+    region: str | None = Query(None, description="按公司所在省筛选（任务 4；配合 city 做省→市级联）"),
     city: str | None = None,
     only_with_jobs: bool = Query(False, description="只看有岗位的公司"),
     sort: str = Query("job_count", pattern="^(job_count|name|created_at)$"),
@@ -53,6 +58,9 @@ async def list_companies(
         conditions.append(Company.name.ilike(f"%{q}%"))
     if industry:
         conditions.append(Company.industry == industry)
+    if region:
+        # 省与市各自独立筛选：前端是"选中省后把市的选项收敛一下"，不是强制成对（任务 4）
+        conditions.append(Company.region == region)
     if city:
         conditions.append(Company.city == city)
     if only_with_jobs:
@@ -77,6 +85,24 @@ async def list_companies(
     return CompanyListResponse(
         total=total, items=[CompanyResponse.model_validate(c) for c in items]
     )
+
+
+# ⚠️ 必须声明在 `/{company_id}` **之前**：否则 "geo-options" 会先被那条
+# `company_id: int` 的路径吃掉，返回 422 而不是命中这里。
+@router.get("/geo-options", response_model=GeoOptionsResponse)
+async def company_geo_options(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """省 → 市级联下拉的选项（**公司所在地**口径，任务 4）。
+
+    数据来源是 `companies.region / city` 的 distinct 值 —— 不做任何硬编码省份表，
+    也不编造库里没有的地域（空库 → 三个空值，前端空着显示）。
+    """
+    rows = (
+        await db.execute(select(Company.region, Company.city).distinct())
+    ).all()
+    return GeoOptionsResponse(**aggregate_geo_options(rows))
 
 
 @router.get("/{company_id}", response_model=CompanyDetail)
@@ -126,7 +152,11 @@ async def update_company(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """人工修正公司名/行业/城市（导入自动识别的值可能不准）。"""
+    """人工修正公司名/行业/规模/省/市（导入自动识别的值可能不准）。
+
+    `CompanyUpdate` 全部字段可选，不传=不改（`exclude_unset`）→ 前端只想改规模时
+    不必把其余字段回传，也就不会误清空。
+    """
     company = await db.get(Company, company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found")
