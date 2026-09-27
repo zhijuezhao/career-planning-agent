@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,8 @@ from app.domain.models.company import Company
 from app.domain.models.job import JobProfile
 from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.models.user import User
+from app.domain.models.vector import JobMatchEmbedding
+from app.domain.services.company_service import refresh_job_count
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
     JobCompanyLinkInfo,
@@ -265,13 +267,46 @@ async def delete_job(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a job profile."""
+    """Delete a job profile.
+
+    **两个子表都要照顾到**，否则这里会 500、或者留下跟真实数据对不上的脏状态：
+
+    - `job_match_embeddings.job_profile_id` 是 **NO ACTION** 外键（三张子表里只有
+      它漏了 CASCADE），而 `create_job` 会调 `embed_job()` 写一行 → 有向量的岗位
+      直接删就是 `ForeignKeyViolationError` → 500。所以先显式清子行。
+    - `job_company_links` 是 CASCADE，行会自己消失，但 `companies.job_count` 这个
+      **冗余列**不会跟着变（公司页按它排序 / `only_with_jobs` 过滤）→ 删完顺手
+      把受影响的公司重算一遍，别让"在招岗位数"虚高。
+    """
     job = await db.get(JobProfile, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job profile not found")
 
+    # 受影响的公司必须在删之前记下来 —— 关联行下面就被 CASCADE 掉了
+    affected_company_ids: set[int] = set()
+    if job.company_id is not None:
+        affected_company_ids.add(job.company_id)
+    affected_company_ids |= set(
+        (
+            await db.execute(
+                select(JobCompanyLink.company_id).where(JobCompanyLink.job_profile_id == job_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # 子行必须先走：NO ACTION 外键不允许父行先删
+    await db.execute(
+        delete(JobMatchEmbedding).where(JobMatchEmbedding.job_profile_id == job_id)
+    )
+
     await db.delete(job)
     await db.flush()
+
+    # 关联行已经随 CASCADE 没了，这里把冗余计数追平
+    for company_id in affected_company_ids:
+        await refresh_job_count(db, company_id)
 
 
 @router.post("/{job_id}/re-embed", response_model=JobProfileResponse)

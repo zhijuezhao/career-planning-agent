@@ -223,7 +223,7 @@ RULES: tuple[Rule, ...] = (
 # 这些表**一行都不删**（真实配置 / 真实数据），写在这里是为了让报告显式说明"为什么没动"。
 KEEP_TABLES: tuple[tuple[str, str], ...] = (
     ("job_raw_data", "87 行全部来自真实导入（#852 3 行 + #853 82 行 + D 级归档 2 行）"),
-    ("llm_providers / llm_models / llm_routes", "真实模型配置（含 default 绑定）"),
+    ("llm_providers / llm_models / llm_routes", "真实模型配置（⚠️ default 路由实际未绑定，见主计划 §16.3）"),
     ("companies / job_company_links", "当前 0 行"),
     ("career_knowledge", "当前 0 行"),
 )

@@ -1,8 +1,12 @@
+import asyncio
 import time
 
 import pytest
+from app.domain.models.vector import JobMatchEmbedding
 from app.main import app
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+from tests.conftest import test_session_factory
 
 _ts = str(int(time.time()))
 
@@ -113,6 +117,54 @@ class TestJobsAPI:
             headers={"Authorization": f"Bearer {admin_token}"},
         )
         assert resp.status_code == 404
+
+    def test_delete_job_with_embedding(self, admin_token: str, client: TestClient):
+        """回归：岗位**有 embedding 行**时删除也必须 204（曾经 500）。
+
+        `job_match_embeddings.job_profile_id` 是 **NO ACTION** 外键（另两张子表是
+        CASCADE，只有它漏了），而 `create_job` 会调 `embed_job()` 写一行。
+        而 `embed_job` 把**所有异常都吞成一条 warning**，所以测试进程里 embedding
+        调用成不成是**碰运气的** —— 老用例 `test_delete_job` 恰好没赶上向量行时才
+        204 绿，是**不确定性的假绿**；embedding 正常时（线上/真栈）「新建岗位 →
+        点删除」必 `ForeignKeyViolationError` → 500。这条用例**显式塞行**，不再看运气。
+        """
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        created = client.post(
+            "/api/v1/admin/jobs",
+            json={"title": f"测试岗位_删除带向量_{_ts}"},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        job_id = created.json()["id"]
+
+        async def _seed_embedding() -> None:
+            async with test_session_factory() as session:
+                session.add(
+                    JobMatchEmbedding(
+                        job_profile_id=job_id,
+                        content="回归占位文本",
+                        embedding=[0.0] * 1024,
+                    )
+                )
+                await session.commit()
+
+        asyncio.run(_seed_embedding())
+
+        resp = client.delete(f"/api/v1/admin/jobs/{job_id}", headers=headers)
+        assert resp.status_code == 204, resp.text
+
+        async def _embedding_count() -> int:
+            async with test_session_factory() as session:
+                return (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(JobMatchEmbedding)
+                        .where(JobMatchEmbedding.job_profile_id == job_id)
+                    )
+                ).scalar_one()
+
+        # 子行必须一并删掉，不能留孤儿向量（否则重建同 id 会撞回同一条）
+        assert asyncio.run(_embedding_count()) == 0
 
     def test_filter_jobs(self, admin_token: str, client: TestClient):
         """Test filtering job profiles."""

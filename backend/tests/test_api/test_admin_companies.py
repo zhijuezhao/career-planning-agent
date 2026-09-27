@@ -358,6 +358,49 @@ class TestCompanyDeleteKeepsJobs:
         assert resp.json()["company_id"] is None
 
 
+class TestJobDeleteRefreshesCompanyCount:
+    def test_delete_job_drops_company_job_count(self, client: TestClient, admin_token: str):
+        """回归：删岗位要把 `companies.job_count` 追平。
+
+        `job_company_links` 是 CASCADE 外键，关联行会随岗位一起消失，但
+        `companies.job_count` 是**冗余列**，不重算就虚高 —— 公司页正按它排序、
+        `only_with_jobs` 也按它过滤，虚高会让"没有在招岗位的公司"继续显示。
+        """
+
+        async def _seed_one() -> tuple[int, int, int]:
+            async with test_session_factory() as session:
+                profile, _ = await upsert_job_profile(
+                    session, {"title": _title("删后计数岗位"), "company": _company("删后计数公司")}
+                )
+                await session.commit()
+                company_id = int(profile.company_id or 0)
+                count = (
+                    await session.execute(
+                        text("SELECT job_count FROM companies WHERE id = :i"), {"i": company_id}
+                    )
+                ).scalar_one()
+                return int(profile.id), company_id, int(count)
+
+        profile_id, company_id, count_before = asyncio.run(_seed_one())
+        assert count_before == 1, f"前置条件不成立：job_count={count_before}"
+
+        resp = client.delete(f"/api/v1/admin/jobs/{profile_id}", headers=_headers(admin_token))
+        assert resp.status_code == 204, resp.text
+
+        async def _count() -> int:
+            async with test_session_factory() as session:
+                return int(
+                    (
+                        await session.execute(
+                            text("SELECT job_count FROM companies WHERE id = :i"),
+                            {"i": company_id},
+                        )
+                    ).scalar_one()
+                )
+
+        assert asyncio.run(_count()) == 0
+
+
 class TestJobsFilterByCompany:
     def test_jobs_filter_and_company_name(self, client: TestClient, admin_token: str, seeded):
         company_id = seeded[_company("甲")]
