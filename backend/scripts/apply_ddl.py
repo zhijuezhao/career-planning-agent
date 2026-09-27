@@ -283,6 +283,43 @@ COLUMN_SPECS: tuple[ColumnSpec, ...] = (
         "certificates",
         "ALTER TABLE job_profiles ADD COLUMN IF NOT EXISTS certificates JSONB",
     ),
+    # ── 任务 1（2026-09-27）：岗位↔公司 多对多模型所需的列（**只加不删**）────────────
+    # 用户构想：公司要有「规模 / 地域(省) / 城市」；岗位详情要能看到"哪些公司在招"。
+    # ⚠️ 地域要**省市两级**（管理端按「先选省、再选市」级联选择，与主流地域筛选一致），
+    #    所以 region(省/直辖市) 与 city(市) 分开存，且存规范化名称（不带「省/市」后缀）。
+    ColumnSpec(
+        "companies",
+        "scale",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS scale VARCHAR(50)",
+    ),
+    ColumnSpec(
+        "companies",
+        "region",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS region VARCHAR(50)",
+    ),
+    # 关联表自带「招聘所在地 / 薪资 / 原始链接」：同一个岗位角色在不同公司在招时，
+    # 这三项**必然不同**，所以它们属于「一次招聘」(link)，不属于「岗位角色」(profile)。
+    # 地域用**招聘所在地**，而不是公司总部所在地。
+    ColumnSpec(
+        "job_company_links",
+        "region",
+        "ALTER TABLE job_company_links ADD COLUMN IF NOT EXISTS region VARCHAR(50)",
+    ),
+    ColumnSpec(
+        "job_company_links",
+        "city",
+        "ALTER TABLE job_company_links ADD COLUMN IF NOT EXISTS city VARCHAR(50)",
+    ),
+    ColumnSpec(
+        "job_company_links",
+        "salary",
+        "ALTER TABLE job_company_links ADD COLUMN IF NOT EXISTS salary VARCHAR(50)",
+    ),
+    ColumnSpec(
+        "job_company_links",
+        "source_url",
+        "ALTER TABLE job_company_links ADD COLUMN IF NOT EXISTS source_url TEXT",
+    ),
 )
 
 CONSTRAINT_SPECS: tuple[ConstraintSpec, ...] = (

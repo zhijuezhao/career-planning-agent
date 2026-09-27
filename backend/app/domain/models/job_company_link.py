@@ -19,6 +19,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
     text,
@@ -43,6 +44,13 @@ class JobCompanyLink(Base):
     )
     source: Mapped[str] = mapped_column(String(20), default="import", server_default="import")
     hit_count: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"))
+    # ── 「一次招聘」自带的属性（同一个岗位角色在不同公司在招时，这几项必然不同）──────────
+    #: 招聘所在地（省/直辖市）+ 城市 —— 省市两级，对应管理端「先选省、再选市」的级联筛选。
+    #: 放**招聘所在地**而不是公司总部：同一家公司在不同城市招的岗位，地域应各算各的。
+    region: Mapped[str | None] = mapped_column(String(50))
+    city: Mapped[str | None] = mapped_column(String(50))
+    salary: Mapped[str | None] = mapped_column(String(50))
+    source_url: Mapped[str | None] = mapped_column(Text)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

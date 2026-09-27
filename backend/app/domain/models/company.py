@@ -21,6 +21,10 @@ class Company(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
     industry: Mapped[str | None] = mapped_column(String(100))
+    #: 规模（存导入表里的原文，如 `1000-9999人`；将来要筛选再加枚举码列）
+    scale: Mapped[str | None] = mapped_column(String(50))
+    #: 地域（省/直辖市）—— 与 `city` 组成**省市两级**，对应管理端「先选省、再选市」的级联筛选
+    region: Mapped[str | None] = mapped_column(String(50))
     city: Mapped[str | None] = mapped_column(String(50))
     job_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
