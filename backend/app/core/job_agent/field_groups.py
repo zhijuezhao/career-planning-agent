@@ -38,10 +38,14 @@ from __future__ import annotations
 from typing import Any
 
 #: **岗位信息**（事实）：源数据 + 对源文本的确定性解析。模型派生流程不得覆盖。
+#:
+#: ⚠️ 这里**没有** `company_id`：它不是岗位自身的属性，而是"谁在招谁"（多对多，2026-09-27
+#: 任务 3 已把该列从 `job_profiles` 删掉，公司归属的唯一真相是 `job_company_links`）。
+#: 本集合会被 `rerun_portrait.py` / 测试当作 `getattr(profile, column)` 的列清单遍历，
+#: 所以**只能放真实存在的列**（放一个已删除的列 = 直接 AttributeError）。
 JOB_INFO_FIELDS: frozenset[str] = frozenset(
     {
         "title",
-        "company_id",
         "industry",
         "level",
         "salary_range",

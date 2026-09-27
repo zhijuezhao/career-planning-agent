@@ -66,8 +66,11 @@ class TestFieldGroups:
             "career_path",
             "transition_paths",
             "certificates",
-            "company_id",
         } <= JOB_INFO_FIELDS
+        # 任务 3（2026-09-27）：`company_id` 已从 job_profiles 删除 → 不再是岗位信息列。
+        # 这一条同时是**防回归**：集合里放已删除的列，`getattr(profile, column)`
+        # （rerun_portrait.py / 本文件下面那个用例）会直接 AttributeError。
+        assert "company_id" not in JOB_INFO_FIELDS
         # 岗位画像：模型精提、服务人岗匹配的三列
         assert PORTRAIT_FIELDS == {"requirement_intensity", "outlook", "summary"}
 

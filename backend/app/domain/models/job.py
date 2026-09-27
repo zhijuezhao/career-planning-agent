@@ -5,7 +5,6 @@ from sqlalchemy import (
     Boolean,
     Computed,
     DateTime,
-    ForeignKey,
     String,
     Text,
     func,
@@ -24,8 +23,10 @@ class JobProfile(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
-    # P2：`(title_key, company_id)` 是岗位去重粒度。生成列由数据库算，**不可写**
-    # （`Computed` 让 SQLAlchemy 把它排除在 INSERT/UPDATE 之外）。
+    # 2026-09-27 任务 3：去重键**只剩岗位名**（`uq_job_profiles_title_key`）。
+    # 岗位是**角色级**的（"Java"只有一个），"哪些公司在招它"全在 `job_company_links`；
+    # P2 的 `(title_key, company_id)` 双键随 `company_id` 列一起删除。
+    # 生成列由数据库算，**不可写**（`Computed` 让 SQLAlchemy 把它排除在 INSERT/UPDATE 之外）。
     title_key: Mapped[str | None] = mapped_column(
         String(200), Computed(_TITLE_KEY_EXPR, persisted=True)
     )
@@ -45,10 +46,8 @@ class JobProfile(Base):
     outlook: Mapped[dict | None] = mapped_column(JSONB)
     summary: Mapped[str | None] = mapped_column(Text)
     source_data_ids: Mapped[dict | None] = mapped_column(JSONB)
-    # B2-2：公司实体外键（DDL 见 apply_ddl.py；NULL = 未识别出公司）
-    company_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("companies.id", ondelete="SET NULL")
-    )
+    # ⚠️ 这里**没有** `company_id`（B2-2 加过、2026-09-27 任务 3 删除）：
+    # 岗位↔公司是多对多，"谁在招谁"的唯一真相是 `job_company_links`。
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -155,8 +155,9 @@ class TestJobCompanyLinksAPI:
             assert resp.status_code == 200, resp.text
             items = resp.json()["items"]
             assert [i["id"] for i in items] == [seeded["job_id"]], key
-            # 岗位行不再挂公司（角色级）："在招公司"看 company_name / company_count
-            assert items[0]["company_id"] is None, key
+            # 岗位行不挂公司（角色级）："在招公司"看 company_name / company_count；
+            # 任务 3 起 `company_id` 连字段都没有了（列已删）
+            assert "company_id" not in items[0], key
             assert items[0]["company_count"] == 2, key
 
     def test_job_list_exposes_company_count(self, client, admin_token):
@@ -185,7 +186,8 @@ class TestJobCompanyLinksAPI:
         primaries = [c for c in data["companies"] if c["is_primary"]]
         assert len(primaries) == 1
         assert primaries[0]["company_id"] == seeded["company_a"]
-        assert data["company_id"] is None
+        # 岗位详情同样不再有 `company_id` 字段（任务 3 删列）
+        assert "company_id" not in data
         # 每条关联自带**这次招聘**的所在地/薪资
         b = next(c for c in data["companies"] if c["company_id"] == seeded["company_b"])
         assert (b["region"], b["city"], b["salary"]) == ("广东", "深圳", "25-40K")
@@ -335,7 +337,7 @@ class TestCompanyDeleteKeepsJobs:
     def test_delete_unbinds_jobs(self, client: TestClient, admin_token: str):
         """删除公司不得删岗位：关联行随公司 CASCADE 消失，**岗位本身留着**。
 
-        任务 2 起岗位是角色级的（`job_profiles.company_id` 已不再写入），所以"解绑"
+        任务 2 起岗位是角色级的（`job_profiles.company_id` 已由任务 3 删除），所以"解绑"
         就是"关联行没了、岗位还在" —— 这也正是 P2 时代那个"删第二家公司撞唯一索引 → 500"
         隐患消失的原因。
         """
@@ -457,8 +459,8 @@ class TestJobsFilterByCompany:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["total"] == 2
-        # 岗位是角色级的 → 行上没有 company_id；展示名来自关联表里最早的那家
-        assert all(item["company_id"] is None for item in data["items"])
+        # 岗位是角色级的 → 行上连 `company_id` 字段都没有；展示名来自关联表里最早的那家
+        assert all("company_id" not in item for item in data["items"])
         assert all(item["company_name"] == _company("甲") for item in data["items"])
         assert all(item["company_count"] == 1 for item in data["items"])
 

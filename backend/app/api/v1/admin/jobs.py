@@ -209,7 +209,7 @@ async def create_job(
     except IntegrityError as exc:
         await db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="岗位已存在（同名同公司，并发写入）"
+            status_code=status.HTTP_409_CONFLICT, detail="岗位已存在（同名，并发写入）"
         ) from exc
     await db.refresh(job)
 
@@ -245,7 +245,7 @@ async def update_job(
     except IntegrityError as exc:
         await db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="岗位已存在（同名同公司，并发写入）"
+            status_code=status.HTTP_409_CONFLICT, detail="岗位已存在（同名，并发写入）"
         ) from exc
     await db.refresh(job)
     return job

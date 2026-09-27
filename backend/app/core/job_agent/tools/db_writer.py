@@ -27,7 +27,7 @@ async def _write_profile(data: dict) -> dict:
     """Insert or update a row in job_profiles（keyed by title）。
 
     B2-2 起：业务逻辑集中在 `job_persist_service.upsert_job_profile`，
-    与导入流水线的 persist 阶段共用同一实现（含公司 upsert + `company_id` 关联）。
+    与导入流水线的 persist 阶段共用同一实现（含公司 upsert + `job_company_links` 关联）。
     """
     if not str(data.get("title") or "").strip():
         return {"success": False, "table": "job_profiles", "record_id": None, "error": "title is required"}
@@ -98,7 +98,7 @@ async def db_writer(
     Inserts or updates records in job-related tables:
     - 'job_raw_data': Insert cleaned/imported job rows.
     - 'job_profiles': Insert or update job profiles (keyed by title);
-      B2-2 起会顺带 upsert `companies` 并把 `job_profiles.company_id` 挂上。
+      B2-2 起会顺带 upsert `companies`，并在 `job_company_links` 上记一条「谁在招谁」。
     - 'job_match_embeddings': Insert embedding vectors for job profiles.
 
     Args:

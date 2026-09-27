@@ -1,7 +1,13 @@
-"""岗位去重键（P2，2026-09-26 用户拍板）。
+"""岗位去重键（P2，2026-09-26 用户拍板；2026-09-27 任务 3 收口）。
 
-**粒度**：`(归一化岗位名, 公司)`。同一岗位名 × N 家公司 = **N 条画像**；
-没有公司数据时退化为「按岗位名唯一」（`company_id IS NULL` 视为同一个"未知公司桶"）。
+**粒度分两层，别混**：
+
+- **落库唯一键**（`job_profiles`）= **只有归一化岗位名**（`uq_job_profiles_title_key`）。
+  岗位是**角色级**的，"同名被 N 家公司招" = **1 条岗位 + N 条 `job_company_links`**
+  （用户 2026-09-27 拍板的多对多），不再像 P2 那样落成 N 条画像。
+- **文件内去重**（`job_dedup_key`）= `(归一化岗位名, 归一化公司名)`。这是"同一份表里
+  两行是否重复"的判断：同名**同公司**才是重复；同名**不同公司**必须都留下，
+  否则会丢掉一条在招关联。
 
 为什么把归一化单独放一层：
 `job_profiles.title_key` 是**数据库生成列**（`lower(regexp_replace(btrim(title), '\\s+', ' ', 'g'))`），
@@ -58,9 +64,10 @@ def normalise_company_name(name: object) -> str | None:
 
 
 def job_dedup_key(title: object, company: object) -> tuple[str, str]:
-    """文件内去重用的键：`(归一化岗位名, 归一化公司名或空串)`。
+    """**文件内**去重用的键：`(归一化岗位名, 归一化公司名或空串)`。
 
-    公司为空串表示"未知公司"——与落库层 `company_id IS NULL` 的"未知公司桶"对应。
+    公司为空串表示"未知公司"。注意这是"同一份表里是否同一行"的判断，**不是**落库唯一键
+    ——落库唯一键只有岗位名（见模块 docstring）：同名不同公司要保留成**两条关联**。
     """
     return normalise_title(title), (normalise_company_name(company) or "")
 

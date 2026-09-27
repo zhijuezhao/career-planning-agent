@@ -8,15 +8,14 @@
 
 B2-5：upsert 岗位画像时同时写 `job_company_links`（岗位 ↔ 公司 多对多）。
 
-**P2（2026-09-26 用户拍板）**：去重粒度由「只看岗位名」改为 **`(归一化岗位名, 公司)`** ——
-同一岗位名 × N 家公司 = **N 条画像**。要点：
-
-1. 定位用 `job_profiles.title_key` 生成列（`lower(regexp_replace(btrim(title), '\\s+', ' ', 'g'))`）
-   + `company_id`，并由唯一索引 `uq_job_profiles_title_company` 在 DB 层兜底；
-2. **公司未知 ≠ 另一家公司**：没有公司列时 `company_id IS NULL` 只是"未知桶"。
-   含公司数据首次出现时，**收养**（adopt）此前"公司未知"的同名画像而不是新建一条，
-   否则用户"先导职业路线表、再导含公司表"会把同一个岗位裂成两条；
-3. `title_key` 是**生成列**，永远不要手写：DDL 见 `apply_ddl.py`，规则见 `core/dedup_keys.py`。
+**去重键的两次收敛**：
+- P2（2026-09-26 用户拍板）把粒度从「只看岗位名」改成 `(归一化岗位名, 公司)`；
+- **2026-09-27 任务 2/3 又收回到「只有岗位名」**：用户改主意为**多对多** ——
+  岗位是**角色级**的，同一岗位名 × N 家公司 = **1 条画像 + N 条关联**，
+  不再复制最贵的角色级内容。定位只用 `job_profiles.title_key` 生成列
+  （`lower(regexp_replace(btrim(title), '\\s+', ' ', 'g'))`），
+  由唯一索引 `uq_job_profiles_title_key` 在 DB 层兜底；`company_id` 列已删除。
+- `title_key` 是**生成列**，永远不要手写：DDL 见 `apply_ddl.py`，规则见 `core/dedup_keys.py`。
 
 **岗位信息 vs 岗位画像（2026-09-27 用户明确要求分开）**：这两类数据此前混在同一个 upsert
 里 —— portrait 的 `career_paths` / `transition_roles` 被直接写进 `career_path` /
@@ -128,8 +127,7 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
       带该次招聘的所在地（省/市）、薪资、原始链接，重复出现累加 `hit_count`。
 
     所以「同名不同公司」= **1 条岗位 + N 条关联**（不再像 P2 那样落成 N 条岗位，
-    避免把最贵的角色级内容按公司数复制）。`job_profiles.company_id` 已不再写入
-    （任务 3 会删掉该列）。
+    避免把最贵的角色级内容按公司数复制）。`job_profiles.company_id` 已由任务 3 删除。
     """
     raw_title = str(data.get("title") or "").strip()
     if not raw_title:
@@ -192,7 +190,7 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
             transition_paths=career_facts.get("transition_paths") or None,
             certificates=career_facts.get("certificates") or None,
             # ⚠️ 不写 `company_id`：岗位是角色级的，公司归属全在 `job_company_links`。
-            #    该列已废弃（任务 3 删掉），留着只会造成"两个真相来源"。
+            #    该列已由任务 3 从表上删除，留着只会造成"两个真相来源"。
         )
         # 画像字段仍走同一个白名单写入器，保证"新建"和"更新"两条路的口径一致
         apply_job_portrait(profile, data)
@@ -246,7 +244,7 @@ async def persist_import_rows(
         written = False
         created = False
         last_exc: Exception | None = None
-        # 唯一索引 `uq_job_profiles_title_company` 会让**并发**写入同一岗位名的第二条
+        # 唯一索引 `uq_job_profiles_title_key` 会让**并发**写入同一岗位名的第二条
         # 抛 IntegrityError。这与"这行数据脏"不是一回事：savepoint 回滚后重查一次
         # 即可转成 update（赢家那条已经落定）。
         for attempt in (1, 2):

@@ -170,8 +170,8 @@ async def sync_companies(
     """修数口子：按关联表全量重算 `job_count`。
 
     2026-09-27 任务 2 起，「谁在招谁」的唯一真相就是 `job_company_links`，
-    `job_profiles.company_id` 不再写入 → 原先那个"把 `company_id` 回填进关联表"的步骤
-    已无对象可回填，故移除（`links_created` 恒为 0，仅为兼容旧前端保留字段）。
+    任务 3 又把 `job_profiles.company_id` 列本身删掉了 → 原先那个"把 `company_id`
+    回填进关联表"的步骤已无对象可回填，故移除（`links_created` 恒为 0，仅为兼容旧前端保留字段）。
     """
     synced = await sync_all_job_counts(db)
     await db.flush()

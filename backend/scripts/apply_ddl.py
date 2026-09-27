@@ -16,18 +16,24 @@
     docker compose exec backend python scripts/apply_ddl.py
 
 行为：
-    * **全幂等**：CREATE TABLE / ADD COLUMN / CREATE INDEX 均带 `IF NOT EXISTS`，
+    * **创建全幂等**：CREATE TABLE / ADD COLUMN / CREATE INDEX 均带 `IF NOT EXISTS`，
       且执行前先查系统目录，逐条打印 `[CREATE]` 或 `[SKIP]`；可重复执行无副作用；
-    * **无破坏性语句**：不含 DROP、不含列类型变更、不回填数据；
+    * **删除也幂等**（任务 3 起）：`DROP` 清单同样先查系统目录，逐条打印 `[DROP]`
+      （已不存在则 `[GONE]`），语句一律带 `IF EXISTS` → 反复执行结果一致；
+    * **不做列类型变更、不回填数据**；
     * **单事务**：任一步失败整体回滚，退出码非 0（不会留下半成品）；
-    * **结束前自检**：7 张新表 + 6 个新列 + 1 个外键 + 8 个索引必须齐备，否则回滚并非 0。
+    * **结束前自检**：创建清单必须**齐备**、删除清单必须**确实消失**，否则回滚并非 0。
 
 覆盖范围：计划 §5.1 七张新表（llm_providers / llm_models / llm_routes / companies /
-job_match_records / link_xpath_templates / link_fetch_cache）+ §5.2 六处新列
-（job_profiles.company_id / source_url / enrich_stats、data_import_jobs.stats、users.qq / wechat）
+job_match_records / link_xpath_templates / link_fetch_cache）+ §5.2 新列
+（job_profiles.source_url / enrich_stats、data_import_jobs.stats、users.qq / wechat）
 + B2-5 的岗位↔公司关联表 `job_company_links`（同一岗位可被多家公司在招）
-+ P2 的岗位去重粒度（§17）：`job_profiles.title_key` 生成列 + `uq_job_profiles_title_company`
-唯一索引 `(title_key, company_id) NULLS NOT DISTINCT`。
++ P2 的岗位去重键生成列 `job_profiles.title_key`
++ **任务 3（2026-09-27）的多对多收口**：岗位是**角色级**的，"谁在招谁"的唯一真相是
+`job_company_links` → **删掉** `job_profiles.company_id`（连同 FK `fk_job_profiles_company_id`
+与索引 `ix_job_profiles_company_id`），唯一索引由
+`uq_job_profiles_title_company (title_key, company_id) NULLS NOT DISTINCT`
+换成 `uq_job_profiles_title_key (title_key)`。
 
 数据库地址优先级：--database-url > 环境变量 DATABASE_URL > backend/.env（get_settings()）> 内置默认值。
 Windows 控制台若中文乱码，先执行: chcp 65001
@@ -82,6 +88,29 @@ class ConstraintSpec:
 class IndexSpec:
     name: str
     sql: str
+
+
+# ── 删除清单（任务 3）────────────────────────────────────────────────────────────────
+# 为什么要"能删"：脚本原先只增不减，于是 P2 留下的 `job_profiles.company_id` 一旦被
+# 多对多模型废止，就**没有任何执行路径**能把它从库里去掉（alembic 基线未落库）。
+# 删除同样要幂等：对象已不存在时不许报错，且要能在"全新库"上跑通。
+
+
+@dataclass(frozen=True)
+class DropIndexSpec:
+    name: str
+
+
+@dataclass(frozen=True)
+class DropConstraintSpec:
+    table: str
+    name: str
+
+
+@dataclass(frozen=True)
+class DropColumnSpec:
+    table: str
+    name: str
 
 
 TABLE_SPECS: tuple[TableSpec, ...] = (
@@ -230,11 +259,6 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
 COLUMN_SPECS: tuple[ColumnSpec, ...] = (
     ColumnSpec(
         "job_profiles",
-        "company_id",
-        "ALTER TABLE job_profiles ADD COLUMN IF NOT EXISTS company_id BIGINT",
-    ),
-    ColumnSpec(
-        "job_profiles",
         "source_url",
         "ALTER TABLE job_profiles ADD COLUMN IF NOT EXISTS source_url TEXT",
     ),
@@ -323,12 +347,8 @@ COLUMN_SPECS: tuple[ColumnSpec, ...] = (
 )
 
 CONSTRAINT_SPECS: tuple[ConstraintSpec, ...] = (
-    ConstraintSpec(
-        "job_profiles",
-        "fk_job_profiles_company_id",
-        "ALTER TABLE job_profiles ADD CONSTRAINT fk_job_profiles_company_id "
-        "FOREIGN KEY (company_id) REFERENCES companies (id) ON DELETE SET NULL",
-    ),
+    # 任务 3（2026-09-27）：`fk_job_profiles_company_id` 随 `company_id` 列一起删除
+    # → 创建清单暂时为空（机制保留，后续新增外键照旧往这里加）。
 )
 
 INDEX_SPECS: tuple[IndexSpec, ...] = (
@@ -360,21 +380,42 @@ INDEX_SPECS: tuple[IndexSpec, ...] = (
         "CREATE INDEX IF NOT EXISTS ix_link_fetch_cache_expires_at ON link_fetch_cache (expires_at)",
     ),
     IndexSpec(
-        "ix_job_profiles_company_id",
-        "CREATE INDEX IF NOT EXISTS ix_job_profiles_company_id ON job_profiles (company_id)",
-    ),
-    IndexSpec(
         "ix_job_company_links_company_id",
         "CREATE INDEX IF NOT EXISTS ix_job_company_links_company_id ON job_company_links (company_id)",
     ),
-    # P2：岗位去重的**最终权威**。`NULLS NOT DISTINCT`（PG15+，本机 PG17）让
-    # `(同名, NULL)` 也算冲突 —— 否则"没有公司列"的表会在 PG 默认的 NULL 语义下
-    # 完全绕过唯一性，重复插入无人拦。
+    # 任务 3（2026-09-27）：岗位唯一键回到**单键 `(title_key)`**。
+    # P2 的 `(title_key, company_id) NULLS NOT DISTINCT` 是为了"同名不同公司各留一条岗位"，
+    # 而多对多模型下"同名不同公司"是**关联表上的多条记录**（岗位只有一条）→ 公司维度从
+    # 去重键里消失。副作用（好事）：`company_id` 被 FK 置 NULL 时不再可能撞出
+    # `duplicate key ... (title, null)`（那个"删第二家公司必 500"的隐患从结构上消失）。
     IndexSpec(
-        "uq_job_profiles_title_company",
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_job_profiles_title_company "
-        "ON job_profiles (title_key, company_id) NULLS NOT DISTINCT",
+        "uq_job_profiles_title_key",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_job_profiles_title_key "
+        "ON job_profiles (title_key)",
     ),
+)
+
+#: 建索引前要先确认没有"归一化后重名"的岗位（否则 PG 的报错不会告诉你是哪几个名字）。
+_TITLE_KEY_INDEX = "uq_job_profiles_title_key"
+
+# ── 删除清单（任务 3）：先索引/外键、后列 ──────────────────────────────────────────────
+# 顺序有意为之：列上还挂着索引/外键时 PostgreSQL 会**连带删除**它们（隐式 CASCADE），
+# 显式按"依赖方 → 被依赖方"写出来，日志能如实反映每一步、也不依赖隐式行为。
+DROP_INDEX_SPECS: tuple[DropIndexSpec, ...] = (
+    # P2 的岗位唯一键（被下面的 `(title_key)` 单键取代）
+    DropIndexSpec("uq_job_profiles_title_company"),
+    # `company_id` 列上的普通索引（反正随后整列都会没）
+    DropIndexSpec("ix_job_profiles_company_id"),
+)
+
+DROP_CONSTRAINT_SPECS: tuple[DropConstraintSpec, ...] = (
+    DropConstraintSpec("job_profiles", "fk_job_profiles_company_id"),
+)
+
+DROP_COLUMN_SPECS: tuple[DropColumnSpec, ...] = (
+    # 多对多模型下"公司归属"的唯一真相是 `job_company_links`；
+    # 留着这一列 = 两个真相来源（且恒为 NULL），必须删。
+    DropColumnSpec("job_profiles", "company_id"),
 )
 
 
@@ -424,6 +465,23 @@ async def _index_exists(conn: AsyncConnection, name: str) -> bool:
     )
 
 
+async def _duplicate_title_keys(conn: AsyncConnection) -> list[tuple[str, int]]:
+    """归一化后重名的岗位名（`(title_key, 条数)`，最多 20 条）。
+
+    只用于**建 `(title_key)` 唯一索引之前**的预检：PG 原生报错是
+    `could not create unique index ... duplicate key value violates unique constraint`，
+    既不说哪几个岗位名撞了、也不说撞了几条 → 现场只能自己再查一遍。
+    """
+    rows = await conn.execute(
+        text(
+            "SELECT title_key, count(*) AS n FROM job_profiles "
+            "WHERE title_key IS NOT NULL GROUP BY title_key HAVING count(*) > 1 "
+            "ORDER BY n DESC, title_key ASC LIMIT 20"
+        )
+    )
+    return [(row[0], row[1]) for row in rows.all()]
+
+
 # --------------------------------------------------------------------------------------
 # 执行
 # --------------------------------------------------------------------------------------
@@ -434,6 +492,12 @@ class StepResult:
     created: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     planned: list[str] = field(default_factory=list)
+    #: 本次真正删掉的对象（任务 3 起）
+    dropped: list[str] = field(default_factory=list)
+    #: 本来就不存在（全新库 / 已经删过）→ 幂等语义下属于"已就位"
+    already_gone: list[str] = field(default_factory=list)
+    #: dry-run 下待删的对象
+    drop_planned: list[str] = field(default_factory=list)
 
 
 async def _ensure(
@@ -459,8 +523,86 @@ async def _ensure(
     print(f"[CREATE] {label}", flush=True)
 
 
+async def _drop(
+    conn: AsyncConnection,
+    kind: str,
+    target: str,
+    exists: bool,
+    sql: str,
+    dry_run: bool,
+    result: StepResult,
+) -> None:
+    """删除一个对象；**已不存在**时只记一笔并继续（这就是"幂等"）。"""
+    label = f"{kind} {target}"
+    if not exists:
+        result.already_gone.append(label)
+        print(f"[GONE]   {label}", flush=True)
+        return
+    if dry_run:
+        result.drop_planned.append(label)
+        print(f"[PLAN]   DROP {label}", flush=True)
+        return
+    await conn.execute(text(sql))
+    result.dropped.append(label)
+    print(f"[DROP]   {label}", flush=True)
+
+
 async def _apply_all(conn: AsyncConnection, dry_run: bool) -> StepResult:
     result = StepResult()
+    # ── ① 先删（任务 3）：删列会连带删掉其上的索引/外键，所以删除永远排在创建之前，
+    #    否则同一个事务里会短暂存在"旧列 + 新单键索引"两个真相。
+    for spec in DROP_INDEX_SPECS:
+        await _drop(
+            conn,
+            "index",
+            spec.name,
+            await _index_exists(conn, spec.name),
+            f"DROP INDEX IF EXISTS {spec.name}",
+            dry_run,
+            result,
+        )
+    for spec in DROP_CONSTRAINT_SPECS:
+        await _drop(
+            conn,
+            "constraint",
+            spec.name,
+            await _constraint_exists(conn, spec.table, spec.name),
+            f"ALTER TABLE {spec.table} DROP CONSTRAINT IF EXISTS {spec.name}",
+            dry_run,
+            result,
+        )
+    for spec in DROP_COLUMN_SPECS:
+        await _drop(
+            conn,
+            "column",
+            f"{spec.table}.{spec.name}",
+            await _column_exists(conn, spec.table, spec.name),
+            f"ALTER TABLE {spec.table} DROP COLUMN IF EXISTS {spec.name}",
+            dry_run,
+            result,
+        )
+
+    # ── ② 建 `(title_key)` 唯一索引之前先预检重名（PG 原生报错说不出是哪几个岗位名）。
+    #    表都不存在时（全新库）跳过：那时的报错由后续步骤自然给出。
+    if await _table_exists(conn, "job_profiles") and not await _index_exists(
+        conn, _TITLE_KEY_INDEX
+    ):
+        duplicates = await _duplicate_title_keys(conn)
+        if duplicates:
+            detail = "、".join(f"{key!r}×{count}" for key, count in duplicates)
+            if dry_run:
+                print(
+                    f"[WARN]   job_profiles 存在归一化后重名的岗位，创建 {_TITLE_KEY_INDEX} 会失败："
+                    f"{detail}",
+                    flush=True,
+                )
+            else:
+                raise RuntimeError(
+                    f"无法把岗位唯一键换成 (title_key)：存在归一化后重名的岗位 —— {detail}"
+                    "（先把这些岗位合并成一条，再重跑本脚本）"
+                )
+
+    # ── ③ 再建（原有语义不变）
     for spec in TABLE_SPECS:
         await _ensure(
             conn, "table", spec.name, await _table_exists(conn, spec.name), spec.sql, dry_run, result
@@ -509,15 +651,44 @@ async def _missing(conn: AsyncConnection) -> list[str]:
     return missing
 
 
+async def _still_present(conn: AsyncConnection) -> list[str]:
+    """删除侧自检：**该没的必须真没**。
+
+    "跑完了"不等于"删掉了" —— 少了这一步，将来有人把某个 DROP 写错名字（或漏了 `IF EXISTS`
+    之外的某种情况），脚本会一路 `[DROP]`/`[GONE]` 报成功，而库里那列还在。
+    """
+    remaining: list[str] = []
+    for spec in DROP_INDEX_SPECS:
+        if await _index_exists(conn, spec.name):
+            remaining.append(f"index {spec.name}（应已删除）")
+    for spec in DROP_CONSTRAINT_SPECS:
+        if await _constraint_exists(conn, spec.table, spec.name):
+            remaining.append(f"constraint {spec.name}（应已删除）")
+    for spec in DROP_COLUMN_SPECS:
+        if await _column_exists(conn, spec.table, spec.name):
+            remaining.append(f"column {spec.table}.{spec.name}（应已删除）")
+    return remaining
+
+
 async def apply_ddl(database_url: str, dry_run: bool) -> int:
-    total = len(TABLE_SPECS) + len(COLUMN_SPECS) + len(CONSTRAINT_SPECS) + len(INDEX_SPECS)
+    total = (
+        len(TABLE_SPECS)
+        + len(COLUMN_SPECS)
+        + len(CONSTRAINT_SPECS)
+        + len(INDEX_SPECS)
+        + len(DROP_INDEX_SPECS)
+        + len(DROP_CONSTRAINT_SPECS)
+        + len(DROP_COLUMN_SPECS)
+    )
     engine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as conn:
             result = await _apply_all(conn, dry_run)
             if dry_run:
                 print(
-                    f"[SUMMARY] dry-run: {len(result.planned)} 待创建 / {len(result.skipped)} 已存在"
+                    f"[SUMMARY] dry-run: {len(result.planned)} 待创建 / "
+                    f"{len(result.drop_planned)} 待删除 / "
+                    f"{len(result.skipped) + len(result.already_gone)} 已就位"
                     f"（共 {total} 步；未落库，跳过自检）",
                     flush=True,
                 )
@@ -525,13 +696,20 @@ async def apply_ddl(database_url: str, dry_run: bool) -> int:
             missing = await _missing(conn)
             if missing:
                 raise RuntimeError("自检失败，以下对象缺失：" + "、".join(missing))
+            remaining = await _still_present(conn)
+            if remaining:
+                raise RuntimeError("自检失败，以下对象应删未删：" + "、".join(remaining))
             print(
-                f"[SUMMARY] created={len(result.created)} skipped={len(result.skipped)} (total={total})",
+                f"[SUMMARY] created={len(result.created)} dropped={len(result.dropped)} "
+                f"already_gone={len(result.already_gone)} skipped={len(result.skipped)} "
+                f"(total={total})",
                 flush=True,
             )
             print(
-                f"[VERIFY] {len(TABLE_SPECS)} 表 + {len(COLUMN_SPECS)} 列 + "
-                f"{len(CONSTRAINT_SPECS)} 外键 + {len(INDEX_SPECS)} 索引齐备",
+                f"[VERIFY] 创建侧齐备：{len(TABLE_SPECS)} 表 + {len(COLUMN_SPECS)} 列 + "
+                f"{len(CONSTRAINT_SPECS)} 外键 + {len(INDEX_SPECS)} 索引；"
+                f"删除侧已生效：{len(DROP_COLUMN_SPECS)} 列 + {len(DROP_CONSTRAINT_SPECS)} 外键 + "
+                f"{len(DROP_INDEX_SPECS)} 索引",
                 flush=True,
             )
             return 0

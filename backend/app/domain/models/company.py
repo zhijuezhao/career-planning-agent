@@ -1,7 +1,8 @@
 """公司实体（B2-2，需求 3）。
 
 表由 `backend/scripts/apply_ddl.py` 落地（B2-0）。`job_count` 是**冗余统计列**，
-由 `company_service.refresh_job_count()` 依据 `job_profiles.company_id` 实算后回写，
+由 `company_service.refresh_job_count()` 依据 `job_company_links` 实算后回写
+（2026-09-27 任务 3 起：公司归属的唯一真相是关联表，`job_profiles.company_id` 已删除），
 避免每次列表都做一次 group by。
 """
 

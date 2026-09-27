@@ -1,4 +1,4 @@
-"""B2-2 / B2-5 / P2 / **任务 2** 单元/集成测试：公司 upsert、岗位↔公司关联、导入批量落库（真实 dev DB）。
+"""B2-2 / B2-5 / P2 / **任务 2 / 任务 3** 单元/集成测试：公司 upsert、岗位↔公司关联、导入批量落库（真实 dev DB）。
 
 范围：
     * `normalise_company_name` 纯函数规则；
@@ -7,6 +7,8 @@
     * **任务 2（2026-09-27）多对多模型**：岗位是**角色级**（一行一个岗位名），
       "同名被多家公司招" = **1 条岗位 + N 条关联**（不再是 P2 的 N 条岗位）；
       一次招聘自带的所在地/薪资/链接落在关联行上；`job_profiles.company_id` 不再写入；
+    * **任务 3（2026-09-27）单键 + 删列**：`job_profiles.company_id`（含 FK/索引）确实不存在，
+      唯一键是 `uq_job_profiles_title_key (title_key)`，"删公司撞唯一索引 → 500"结构上消失；
     * `persist_import_rows` 的统计与**行级容错**（一行没 title 不该拖垮其他行）。
 
 所有用例只创建 `b22_<ts>_*` 前缀的数据，结束时按前缀 + 自增 id 精确清理。
@@ -144,7 +146,8 @@ class TestUpsertJobProfile:
             await session.commit()
 
             assert created is True
-            assert profile.company_id is None  # 岗位行不再挂公司（该列已废弃）
+            # 任务 3：`company_id` 已从表/ORM 删除 —— 公司归属只在关联表里
+            assert not hasattr(profile, "company_id")
 
             link = (
                 await session.execute(
@@ -395,7 +398,7 @@ class TestJobCompanyLinks:
         async with test_session_factory() as session:
             unknown, created_unknown = await upsert_job_profile(session, {"title": title})
             await session.commit()
-            assert created_unknown is True and unknown.company_id is None
+            assert created_unknown is True
 
             adopted, created_adopted = await upsert_job_profile(
                 session, {"title": title, "company": _company("收养公司"), "industry": "互联网"}
@@ -405,7 +408,7 @@ class TestJobCompanyLinks:
             assert created_adopted is False  # 同一条岗位，不是新建
             assert adopted.id == unknown.id
             assert adopted.industry == "互联网"
-            assert adopted.company_id is None  # 岗位行仍不挂公司
+            assert not hasattr(adopted, "company_id")  # 岗位行不挂公司（任务 3 已删该列）
 
             total = (
                 await session.execute(
@@ -463,9 +466,8 @@ class TestJobCompanyLinks:
     async def test_unique_index_blocks_manual_duplicate(self):
         """**岗位名唯一**由 DB 唯一索引兜底 —— 绕过服务层直插也会被拦。
 
-        索引定义目前仍是 `uq_job_profiles_title_company (title_key, company_id) NULLS NOT DISTINCT`，
-        但任务 2 起 `company_id` 已不再写入（恒为 NULL）→ 实际效果就是"岗位名唯一"
-        （归一化后同名即冲突）。任务 3 会把它正式换成 `(title_key)` 单键索引。
+        任务 3（2026-09-27）起索引是 **`uq_job_profiles_title_key (title_key)`** 单键
+        （P2 的 `(title_key, company_id) NULLS NOT DISTINCT` 随 `company_id` 列一起删除）。
         """
         title = _title("唯一索引岗位")
         async with test_session_factory() as session:
@@ -474,7 +476,7 @@ class TestJobCompanyLinks:
             )
             await session.commit()
             key = profile.title_key
-            assert profile.company_id is None
+            assert not hasattr(profile, "company_id")  # 列已删（任务 3）
 
         async with test_session_factory() as session:
             with pytest.raises(IntegrityError):
@@ -556,3 +558,120 @@ class TestJobCompanyLinks:
             assert link.city is None
             company = await session.get(Company, link.company_id)
             assert company is not None and company.city is None
+
+
+class TestTask3SingleKeySchema:
+    """任务 3（2026-09-27）的**结构验收**：单键 + 删列在库里真的生效。
+
+    直接查系统目录（而不是相信脚本打印的 `[DROP]`）：脚本删错名字、或只跑了一半，
+    这里就会红。
+    """
+
+    async def test_company_id_column_and_its_fk_index_are_gone(self):
+        async with test_session_factory() as session:
+            column_count = await session.scalar(
+                text(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'job_profiles' "
+                    "AND column_name = 'company_id'"
+                )
+            )
+            assert column_count == 0, "job_profiles.company_id 应已删除（任务 3）"
+            assert not hasattr(JobProfile, "company_id"), "ORM 上仍残留 company_id 字段"
+
+            fk_count = await session.scalar(
+                text(
+                    "SELECT count(*) FROM pg_constraint "
+                    "WHERE conname = 'fk_job_profiles_company_id' "
+                    "AND conrelid = to_regclass('public.job_profiles')"
+                )
+            )
+            assert fk_count == 0, "外键 fk_job_profiles_company_id 应已删除"
+
+            stale_index_count = await session.scalar(
+                text(
+                    "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = 'public' AND c.relkind = 'i' "
+                    "AND c.relname IN ('ix_job_profiles_company_id', 'uq_job_profiles_title_company')"
+                )
+            )
+            assert stale_index_count == 0, "P2 的旧索引应已全部删除"
+
+    async def test_unique_key_is_title_key_single_column(self):
+        async with test_session_factory() as session:
+            definition = await session.scalar(
+                text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE schemaname = 'public' AND indexname = 'uq_job_profiles_title_key'"
+                )
+            )
+        assert definition is not None, "任务 3 的单键唯一索引 uq_job_profiles_title_key 不存在"
+        assert "UNIQUE" in definition.upper()
+        assert definition.rstrip().endswith("(title_key)"), definition
+        assert "company_id" not in definition
+
+    async def test_deleting_second_company_does_not_raise(self):
+        """P2 隐患回归：两家公司各有同名岗位 → 删第二家**不再**撞唯一索引。
+
+        P2 时代 `company_id` 上是 `ON DELETE SET NULL`，而唯一索引把它当身份
+        （`(title_key, company_id) NULLS NOT DISTINCT`）→ 删第二家时两条岗位行都变成
+        `(同名, NULL)` → `duplicate key ... (…, null)` → 接口 **500**（已实测复现）。
+        任务 3 把该列删掉后，这条路径**结构上不可能**再发生。
+        """
+        title = _title("删公司回归")
+        async with test_session_factory() as session:
+            profile, _ = await upsert_job_profile(
+                session, {"title": title, "company": _company("删公司甲")}
+            )
+            await session.commit()
+            profile_id = profile.id
+            links = list(
+                (
+                    await session.execute(
+                        select(JobCompanyLink).where(JobCompanyLink.job_profile_id == profile_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(links) == 1
+            first_company_id = links[0].company_id
+
+            # 第二家公司招**同一个岗位**（多对多：岗位还是那一条）
+            again, created = await upsert_job_profile(
+                session, {"title": title, "company": _company("删公司乙")}
+            )
+            await session.commit()
+            assert created is False and again.id == profile_id
+            second_company_id = (
+                await session.execute(
+                    select(Company.id).where(Company.name == _company("删公司乙"))
+                )
+            ).scalar_one()
+            assert second_company_id != first_company_id
+
+        # 删掉第二家公司：唯一索引若还是 (title_key, company_id)，这里会 IntegrityError
+        async with test_session_factory() as session:
+            company = await session.get(Company, second_company_id)
+            assert company is not None
+            await session.delete(company)
+            await session.commit()  # 不抛异常 = 通过
+
+        async with test_session_factory() as session:
+            assert (
+                await session.execute(
+                    select(func.count()).select_from(JobProfile).where(JobProfile.id == profile_id)
+                )
+            ).scalar_one() == 1  # 岗位本身不受影响
+            remaining = list(
+                (
+                    await session.execute(
+                        select(JobCompanyLink.company_id).where(
+                            JobCompanyLink.job_profile_id == profile_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert remaining == [first_company_id]  # 只剩第一家的关联

@@ -96,8 +96,9 @@ class JobProfileResponse(BaseModel):
     outlook: dict | list | str | None
     summary: str | None
     source_data_ids: dict | None
-    # B2-2：公司实体（company_name 由接口 join 填充，ORM 上不存在该列）
-    company_id: int | None = None
+    # 2026-09-27 任务 3：这里**不再有 `company_id`** —— 岗位是角色级的，公司归属全在
+    # 「在招公司」清单（`JobProfileDetail.companies`）里；`company_name` / `company_count`
+    # 由接口按 `job_company_links` 现算（ORM 上都不存在这两列）。
     company_name: str | None = None
     # B2-5：有多少家公司在招这个岗位（关联表统计）
     company_count: int = 0
@@ -581,7 +582,9 @@ class CompanyListResponse(BaseModel):
 class CompanySyncResponse(BaseModel):
     synced: int
     with_jobs: int
-    # B2-5：把历史上只有 job_profiles.company_id 的关联补进 job_company_links 的行数
+    #: **遗留字段，恒为 0**（仅为兼容旧前端保留）。B2-5 曾用它报告"把历史上只有
+    #: `job_profiles.company_id` 的关联补进 `job_company_links` 的行数"；2026-09-27 任务 2
+    #: 起岗位不再写 `company_id`（任务 3 已删该列）→ 回填无对象，`/companies/sync` 只重算计数。
     links_created: int = 0
 
 

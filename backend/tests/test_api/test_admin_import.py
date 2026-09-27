@@ -473,7 +473,7 @@ class TestImportS71StateMachine:
                         await session.execute(
                             text(
                                 # 任务 2（2026-09-27）起岗位是**角色级**的、公司归属在关联表，
-                                # 所以不能再 join `j.company_id`（那列已不再写入）。
+                                # 所以不能再 join `j.company_id`（该列 2026-09-27 任务 3 已删除）。
                                 "SELECT j.title, c.name, c.job_count "
                                 "FROM job_profiles j "
                                 "JOIN job_company_links l ON l.job_profile_id = j.id "
