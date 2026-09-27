@@ -40,25 +40,12 @@ from app.core.job_agent.field_groups import portrait_payload
 from app.domain.models.job import JobProfile, JobRawData
 from app.domain.services.company_service import (
     link_job_company,
+    normalise_geo_name,
     refresh_job_count,
     upsert_company,
 )
 
 _EMPTY = (None, "", [], {})
-
-#: 地域占位值：清洗阶段对缺失城市会填「未知」之类，**不能**当作真实地域写进库，
-#: 否则"在未知招的岗位"会污染按地域的筛选与统计（现有 82 行的 `city` 就全是「未知」）。
-_GEO_PLACEHOLDERS = frozenset({"未知", "不限", "无", "-", "--", "/", "其他", "nan", "none"})
-
-
-def _clean_geo(value: object) -> str | None:
-    """地域（省/市）清洗：占位值/空白 → ``None``，其余去空白后返回。"""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text or text.lower() in _GEO_PLACEHOLDERS:
-        return None
-    return text
 
 
 def _pick(data: dict, key: str, current):
@@ -135,9 +122,10 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
     title = raw_title[:200]
     title_key = normalise_title(title)
 
-    # 招聘所在地（省/市）：清洗占位值（现有 82 行的 city 是「未知」，不能当真实地域）
-    region = _clean_geo(data.get("region"))
-    city = _clean_geo(data.get("city"))
+    # 招聘所在地（省/市）：归一化为**短名**（与下选项同一套规则）+ 过滤占位值
+    # （老数据的 `city` 是「未知」，不能当真实地域）
+    region = normalise_geo_name(data.get("region"))
+    city = normalise_geo_name(data.get("city"))
 
     company = await upsert_company(
         session,

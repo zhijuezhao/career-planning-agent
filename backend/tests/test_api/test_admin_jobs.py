@@ -399,7 +399,13 @@ class TestJobGeoFilterAPI:
         data = resp.json()
         assert set(data) == {"regions", "cities_by_region", "all_cities"}
 
-        # link 口径
+        # ① 官方行政区划参考数据也在（任务 4 续：空库也要有标准省市可选）
+        assert len(data["regions"]) >= 34
+        assert {"广东", "内蒙古", "台湾", "香港", "澳门"} <= set(data["regions"])
+        assert "深圳" in data["cities_by_region"]["广东"]
+        assert data["cities_by_region"]["北京"] == ["北京"]  # 直辖市第二级=自己
+
+        # ② link 口径
         assert "青海" in data["regions"]
         assert "西宁" in data["cities_by_region"]["青海"]
         # 回落口径（公司所在地也得进级联，才与上面的筛选一致）

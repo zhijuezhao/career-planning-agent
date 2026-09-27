@@ -480,8 +480,9 @@ async def _seed_geo_companies() -> dict[str, int]:
 
     - `青海甲`：规模 + 省 + 市齐全；
     - `西藏乙`：规模 + 省 + 市齐全；
-    - `无省丙`：**有市无省** —— 这种行必须能被筛到（靠 `all_cities`），
-      否则它在"先选省"的级联里就是个筛不到的孤岛；
+    - `无省丙`：**有市无省**，且这个市名**只存在于库里**（不在行政区划参考数据中）——
+      它必须仍能通过 `all_cities` 被筛到；参考数据里没有它，所以它不会挂到任何省下面。
+      （任务 4 续：下拉选项 = 官方参考数据 ∪ 库里的值，所以"只在库里的写法"要单独测。）
     - `待改丁`：规模/省/市**全空**，专供 PUT 用例 —— 不拿上面几家做修改，
       否则会污染 `test_geo_options_cascade_shape` 对级联数据的断言（测试之间不能互相踩）。
     """
@@ -489,7 +490,7 @@ async def _seed_geo_companies() -> dict[str, int]:
         for name, scale, region, city in (
             ("青海甲", "1000-9999人", "青海", "西宁"),
             ("西藏乙", "100-499人", "西藏", "拉萨"),
-            ("无省丙", "20-99人", None, "日喀则"),
+            ("无省丙", "20-99人", None, "测试无省城"),
             ("待改丁", None, None, None),
         ):
             await upsert_job_profile(
@@ -554,38 +555,107 @@ class TestCompanyScaleRegionAPI:
         assert miss.json()["total"] == 0
 
     def test_update_sets_scale_and_region(self, client: TestClient, admin_token: str, geo_companies):
-        """人工修正能写规模/省/市（导入识别的值可能不准）。
+        """人工修正能写规模/省/市，且**省/市按短名归一**（导入识别的值可能不准）。
 
-        用 `待改丁`（规模/省/市全空）—— 不碰上面那几家，避免污染级联数据源的断言。
+        用 `待改丁`（规模/省/市全空，且**只有它**允许被本类修改）—— 不碰别的公司，
+        避免污染级联数据源的断言。
+        下发的是官方全名「广东省/东莞市」→ 库里应落**短名**「广东/东莞」，
+        否则它跟级联下拉给的「广东」对不上，这行就永远筛不到。
         """
         company_id = geo_companies[_company("geo待改丁")]
         resp = client.put(
             f"/api/v1/admin/companies/{company_id}",
-            json={"scale": "500-999人", "region": "甘肃", "city": "兰州"},
+            json={"scale": "500-999人", "region": "广东省", "city": "东莞市"},
             headers=_headers(admin_token),
         )
         assert resp.status_code == 200, resp.text
         data = resp.json()
-        assert (data["scale"], data["region"], data["city"]) == ("500-999人", "甘肃", "兰州")
+        assert (data["scale"], data["region"], data["city"]) == ("500-999人", "广东", "东莞")
 
         # 落库为真（再查一次详情，不靠 PUT 的响应回显）
         detail = client.get(
             f"/api/v1/admin/companies/{company_id}", headers=_headers(admin_token)
         ).json()
-        assert (detail["scale"], detail["region"], detail["city"]) == ("500-999人", "甘肃", "兰州")
+        assert (detail["scale"], detail["region"], detail["city"]) == ("500-999人", "广东", "东莞")
+
+    def test_import_write_path_normalises_full_names_to_short(
+        self, client: TestClient, admin_token: str
+    ):
+        """导入写「广东省/深圳市」→ 库里存**短名**，且用短名**筛得到**。
+
+        这条是"写法必须同源"的端到端证明：只做下拉不做归一化，或只做归一化不做下拉，
+        都会在这里红。
+        """
+        title = _title("geo归一化岗")
+        company_name = _company("geo归一化公司")
+
+        async def _seed() -> int:
+            async with test_session_factory() as session:
+                await upsert_job_profile(
+                    session,
+                    {
+                        "title": title,
+                        "company": company_name,
+                        "region": "广东省",
+                        "city": "深圳市",
+                    },
+                )
+                await session.commit()
+                return int(
+                    (
+                        await session.execute(
+                            select(Company.id).where(Company.name == company_name)
+                        )
+                    ).scalar_one()
+                )
+
+        async def _stored(company_id: int) -> tuple[str | None, str | None]:
+            async with test_session_factory() as session:
+                row = (
+                    await session.execute(
+                        text("SELECT region, city FROM companies WHERE id = :i"),
+                        {"i": company_id},
+                    )
+                ).one()
+                return (row[0], row[1])
+
+        company_id = asyncio.run(_seed())
+        assert asyncio.run(_stored(company_id)) == ("广东", "深圳")
+
+        # 用短名筛选命中（这才是归一化的目的）
+        hit = client.get(
+            "/api/v1/admin/companies",
+            params={"region": "广东", "city": "深圳", "limit": 100},
+            headers=_headers(admin_token),
+        ).json()
+        assert company_id in [c["id"] for c in hit["items"]]
 
     def test_geo_options_cascade_shape(self, client: TestClient, admin_token: str, geo_companies):
-        """级联数据源：省列表 / 省→市收敛 / 全部市（含"有市无省"）。"""
+        """级联数据源 = **官方参考数据 ∪ 库里的值**（任务 4 续）。
+
+        - 参考数据保证**空库也有标准省市可选**（用户要求参考民政部写法）；
+        - 合并库里的值保证导入的非标准写法**不丢**（否则"筛得到却选不到"）。
+        """
         resp = client.get("/api/v1/admin/companies/geo-options", headers=_headers(admin_token))
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert set(data) == {"regions", "cities_by_region", "all_cities"}
 
+        # ① 官方参考数据在位（与库里有没有数据无关）：34 个省级 + 含港澳台
+        assert len(data["regions"]) >= 34
+        assert {"广东", "内蒙古", "台湾", "香港", "澳门"} <= set(data["regions"])
+        assert "深圳" in data["cities_by_region"]["广东"]
+        # 直辖市：第二级 = 它自己（不列"区"）
+        assert data["cities_by_region"]["北京"] == ["北京"]
+
+        # ② 库里的值在位（含"只在库里"的写法）
         assert set(_GEO_SCOPE) <= set(data["regions"])
         assert "西宁" in data["cities_by_region"]["青海"]
-        assert "日喀则" in data["all_cities"]
-        # 「有市无省」的行不能出现在任何省的市列表里（它没有省可挂）
-        assert "日喀则" not in [c for cities in data["cities_by_region"].values() for c in cities]
+        assert "测试无省城" in data["all_cities"]
+        # 它只可能在 all_cities 里（参考数据没有它，库里那行又没写省）
+        assert "测试无省城" not in [
+            c for cities in data["cities_by_region"].values() for c in cities
+        ]
 
     def test_geo_options_not_shadowed_by_company_id_route(self, client: TestClient, admin_token: str):
         """`/companies/geo-options` 必须命中自己的路由，而不是被 `/{company_id}` 吃掉（422）。"""

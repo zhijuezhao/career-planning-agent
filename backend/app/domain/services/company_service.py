@@ -1,4 +1,4 @@
-"""公司实体服务（B2-2 / B2-5）：按名称幂等 upsert + 岗位↔公司关联 + 岗位数同步。
+"""公司实体服务（B2-2 / B2-5 / 任务 4）：按名称幂等 upsert + 岗位↔公司关联 + 岗位数同步。
 
 为什么单独一层：公司既可能来自导入流水线（`persist` 阶段）、也可能来自
 `db_writer` 工具调用或管理端手工建岗位，三处必须用**同一套**归一化与 upsert 规则，
@@ -8,6 +8,9 @@ B2-5 起新增 `job_company_links`（岗位 ↔ 公司 多对多）：
 - 「某家公司有多少岗位」= 该公司关联的**不同岗位**数（`count(distinct job_profile_id)`）；
 - 「某个岗位有多少家公司在招」= 该岗位关联的**不同公司**数。
 两个方向的计数都以关联表为真相来源，`companies.job_count` 只是它的冗余缓存。
+
+任务 4（2026-09-27）起这里还负责**地域归一化**（`normalise_geo_name`）与
+**省市两级级联选项**（`aggregate_geo_options`，参考数据 + 库里 distinct 值合并）。
 """
 
 from __future__ import annotations
@@ -18,11 +21,16 @@ from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.geo_divisions import GEO_ALIASES, PROVINCE_CITIES, _shorten
 from app.domain.models.company import Company
 from app.domain.models.job_company_link import JobCompanyLink
 
 # 明显不是公司名的占位值（导入表里常见）
 _PLACEHOLDERS = {"nan", "none", "null", "-", "--", "未知", "未提供", "保密", "不详"}
+
+#: 地域占位值：清洗阶段对缺失城市会填「未知」之类，**不能**当作真实省/市写进库，
+#: 否则"在未知招的岗位"会污染按地域的筛选与统计（老数据的 `city` 就全是「未知」）。
+_GEO_PLACEHOLDERS = frozenset({"未知", "不限", "无", "-", "--", "/", "其他", "nan", "none"})
 
 
 def normalise_company_name(name: str | None) -> str | None:
@@ -33,6 +41,34 @@ def normalise_company_name(name: str | None) -> str | None:
     if not text or text.lower() in _PLACEHOLDERS:
         return None
     return text[:200]
+
+
+def normalise_geo_name(value: object) -> str | None:
+    """省/市名归一化为**短名**；无意义的值返回 None。
+
+    三步（顺序即优先级）：
+
+    1. 空白 / 占位值（`未知`、`不限`、`-`…）→ `None`。清洗阶段给缺失城市填的「未知」
+       **不能**当真实地域入库，否则"在未知招的岗位"会污染按地域的筛选与统计；
+    2. **命中参考表** → 用表里的短名。参考表同时收录官方全名与短名，
+       所以 `广东省`、`广东` 都会变成 `广东`；
+    3. 未命中 → 按行政后缀剥一层（`_shorten`），仍为空则 `None`。
+
+    ⚠️ 写库与**下拉选项**共用这一套规则（用户 2026-09-27 裁决"统一短名"）：
+    否则导入写进来的是 `广东省`、下拉给出的是 `广东`，筛选就永远对不上。
+    """
+    if value is None:
+        return None
+    text = " ".join(str(value).split()).strip()
+    if not text or text.lower() in _GEO_PLACEHOLDERS:
+        return None
+
+    canonical = GEO_ALIASES.get(text)
+    if canonical:
+        return canonical
+
+    shortened = _shorten(text).strip()
+    return shortened or None
 
 
 async def upsert_company(
@@ -48,10 +84,16 @@ async def upsert_company(
 
     industry / city / region / scale **只在公司行为空时补全**：这些字段允许管理端手工修正，
     后续导入不应把它们覆盖回去。
+
+    地域（region/city）在这里统一走 `normalise_geo_name()` → **短名入库**，
+    保证与下拉选项同一套写法（任务 4）。
     """
     clean = normalise_company_name(name)
     if clean is None:
         return None
+
+    region = normalise_geo_name(region)
+    city = normalise_geo_name(city)
 
     company = (
         await session.execute(select(Company).where(Company.name == clean).limit(1))
@@ -61,8 +103,8 @@ async def upsert_company(
         company = Company(
             name=clean,
             industry=(industry or None),
-            city=(city or None),
-            region=(region or None),
+            city=city,
+            region=region,
             scale=(scale or None),
             job_count=0,
         )
@@ -100,7 +142,11 @@ async def link_job_company(
     这三项必然不同。
 
     取值策略：**非空的新值覆盖旧值**（表格是这次招聘的事实来源），空值不覆盖。
+    地域同样归一化为**短名**（与下拉选项同一套写法）。
     """
+    region = normalise_geo_name(region)
+    city = normalise_geo_name(city)
+
     link = (
         await session.execute(
             select(JobCompanyLink).where(
@@ -116,8 +162,8 @@ async def link_job_company(
             company_id=company_id,
             source=source,
             hit_count=1,
-            region=(region or None),
-            city=(city or None),
+            region=region,
+            city=city,
             salary=(salary or None),
             source_url=(source_url or None),
         )
@@ -169,19 +215,25 @@ async def sync_all_job_counts(session: AsyncSession) -> int:
     return len(companies)
 
 
-def aggregate_geo_options(pairs: Iterable[tuple[str | None, str | None]]) -> dict[str, object]:
+def aggregate_geo_options(
+    pairs: Iterable[tuple[str | None, str | None]], *, include_reference: bool = True
+) -> dict[str, object]:
     """把 `(省, 市)` 明细汇总成**省 → 市 级联下拉**要的三份数据（纯函数，无 IO）。
 
     返回 `{"regions": [...], "cities_by_region": {省: [市...]}, "all_cities": [...]}`，
-    三份都是**排序去重**的（排序在前端表现为稳定的下拉顺序，省得前端再排一遍）。
+    三份都是**排序去重**的（排序即前端下拉的稳定顺序，省得前端再排一遍）。
 
     - `regions`：有省的 distinct 省；
     - `cities_by_region`：省 → 该省的市；
     - `all_cities`：全部市 —— 含"只写了市、没写省"的行，否则这些行在当前筛选器里
       **永远筛不到**（选中它们的省是做不到的，因为压根没有省）。
 
-    ⚠️ 刻意**不编造**地域：库里没有就返回三个空值，由前端空着显示
-    （`companies` / `job_company_links` 现在都还是 0 行，这条路径就是空库的真实形态）。
+    `include_reference=True`（默认）时，结果 = **官方行政区划参考数据**（省→市两级，
+    见 `app/core/geo_divisions.py`）**∪ 库里出现的值**：
+
+    - 参考数据让下拉在**空库**时也有标准省市可选（用户 2026-09-27 要求参考民政部写法）；
+    - 合并库里的值是为了**不丢**导入来的非标准写法 —— 否则那些行筛得到却选不到，
+      或者选得到却筛不到。
 
     放在服务层但**不 import schemas**：返回普通 dict，由接口侧包成 `GeoOptionsResponse`，
     免得领域层反向依赖接口契约。
@@ -189,6 +241,12 @@ def aggregate_geo_options(pairs: Iterable[tuple[str | None, str | None]]) -> dic
     regions: set[str] = set()
     cities_by_region: dict[str, set[str]] = {}
     all_cities: set[str] = set()
+
+    if include_reference:
+        for province, cities in PROVINCE_CITIES.items():
+            regions.add(province)
+            cities_by_region.setdefault(province, set()).update(cities)
+            all_cities.update(cities)
 
     for raw_region, raw_city in pairs:
         region = str(raw_region).strip() if raw_region is not None else ""
@@ -214,6 +272,7 @@ __all__ = [
     "company_job_count",
     "link_job_company",
     "normalise_company_name",
+    "normalise_geo_name",
     "refresh_job_count",
     "sync_all_job_counts",
     "upsert_company",

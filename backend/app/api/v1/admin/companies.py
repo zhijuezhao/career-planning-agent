@@ -22,7 +22,11 @@ from app.domain.models.company import Company
 from app.domain.models.job import JobProfile
 from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.models.user import User
-from app.domain.services.company_service import aggregate_geo_options, sync_all_job_counts
+from app.domain.services.company_service import (
+    aggregate_geo_options,
+    normalise_geo_name,
+    sync_all_job_counts,
+)
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
     CompanyDetail,
@@ -171,6 +175,10 @@ async def update_company(
             raise HTTPException(status_code=409, detail="Another company already uses this name")
 
     for field, value in fields.items():
+        # 省/市归一化为**短名**（与级联下拉同一套写法）：否则管理端手输「广东省」
+        # 存进去后，下拉给出的却是「广东」→ 该行永远筛不到。
+        if field in ("region", "city"):
+            value = normalise_geo_name(value)
         setattr(company, field, value)
 
     await db.flush()
