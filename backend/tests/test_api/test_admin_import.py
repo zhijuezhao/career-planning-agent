@@ -472,8 +472,12 @@ class TestImportS71StateMachine:
                     rows = (
                         await session.execute(
                             text(
+                                # 任务 2（2026-09-27）起岗位是**角色级**的、公司归属在关联表，
+                                # 所以不能再 join `j.company_id`（那列已不再写入）。
                                 "SELECT j.title, c.name, c.job_count "
-                                "FROM job_profiles j LEFT JOIN companies c ON c.id = j.company_id "
+                                "FROM job_profiles j "
+                                "JOIN job_company_links l ON l.job_profile_id = j.id "
+                                "JOIN companies c ON c.id = l.company_id "
                                 "WHERE j.title LIKE :p ORDER BY j.title"
                             ),
                             {"p": f"%{suffix}"},

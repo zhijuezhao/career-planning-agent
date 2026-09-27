@@ -47,6 +47,20 @@ from app.domain.services.company_service import (
 
 _EMPTY = (None, "", [], {})
 
+#: 地域占位值：清洗阶段对缺失城市会填「未知」之类，**不能**当作真实地域写进库，
+#: 否则"在未知招的岗位"会污染按地域的筛选与统计（现有 82 行的 `city` 就全是「未知」）。
+_GEO_PLACEHOLDERS = frozenset({"未知", "不限", "无", "-", "--", "/", "其他", "nan", "none"})
+
+
+def _clean_geo(value: object) -> str | None:
+    """地域（省/市）清洗：占位值/空白 → ``None``，其余去空白后返回。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in _GEO_PLACEHOLDERS:
+        return None
+    return text
+
 
 def _pick(data: dict, key: str, current):
     """取新值；空值视为「本次没提供」，保留原值（避免导入缺列把已有画像抹平）。"""
@@ -88,51 +102,34 @@ async def write_raw_job(session: AsyncSession, data: dict) -> JobRawData:
     return row
 
 
-async def _find_profile(
-    session: AsyncSession, title_key: str, company_id: int | None
-) -> tuple[JobProfile | None, bool]:
-    """按 `(title_key, company_id)` 定位既有画像。
+async def _find_profile(session: AsyncSession, title_key: str) -> JobProfile | None:
+    """按 `title_key`（归一化岗位名）定位既有岗位。
 
-    返回 `(画像或 None, 是否需要把 company_id 落定)`。
-
-    公司已知时：先找精确的 `(title_key, company_id)`；没有就**收养**同名的
-    "公司未知"（`company_id IS NULL`）画像 —— 这是"先导无公司表、再导含公司表"
-    不产生重复岗位的关键。
-    公司未知时：先找"未知桶"；没有就退让到该岗位名下 id 最小的一条
-    （"未知"没有区分能力，不该把一个已有岗位裂成两条）。
+    **岗位是角色级的**（`Java`、`前端开发工程师`），不含公司维度 —— 同一个岗位被多家公司
+    在招，是**关联表**上的多条记录，不是多条岗位（用户 2026-09-27 拍板的多对多模型）。
     """
-    base = select(JobProfile).where(JobProfile.title_key == title_key)
-
-    if company_id is not None:
-        hit = (
-            await session.execute(base.where(JobProfile.company_id == company_id).limit(1))
-        ).scalar_one_or_none()
-        if hit is not None:
-            return hit, False
-        adopted = (
-            await session.execute(base.where(JobProfile.company_id.is_(None)).limit(1))
-        ).scalar_one_or_none()
-        return adopted, adopted is not None
-
-    hit = (
-        await session.execute(base.where(JobProfile.company_id.is_(None)).limit(1))
+    return (
+        await session.execute(
+            select(JobProfile).where(JobProfile.title_key == title_key).limit(1)
+        )
     ).scalar_one_or_none()
-    if hit is not None:
-        return hit, False
-    fallback = (
-        await session.execute(base.order_by(JobProfile.id).limit(1))
-    ).scalar_one_or_none()
-    return fallback, False
 
 
 async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProfile, bool]:
-    """按 `(岗位名, 公司)` 去重 upsert 岗位画像；顺带 upsert 公司、写「岗位↔公司」关联。
+    """按**岗位名**（`title_key`）upsert 岗位；顺带 upsert 公司、写「在招关联」。
 
     返回 (profile, created)。title 为空抛 ValueError（调用方按行容错）。
 
-    公司归属（P2 起）：`job_profiles.company_id` 就是键的一部分（每个岗位一条公司），
-    不再需要 B2-5 那个"首次为准、后续不覆盖"的补丁 —— 同名不同公司本来就会落成两条画像；
-    `job_company_links` 仍然记录全部在招公司（B3 链接富化与历史来源要用）。
+    数据模型（2026-09-27 任务 2 起，用户拍板的**多对多**）：
+
+    - `job_profiles` = **岗位角色级**（技能 / 晋升 / 换岗 / 证书 / 画像），**一行一个岗位名**；
+    - `companies` = 公司（名称 / 规模 / 省市）；
+    - `job_company_links` = 「**谁在招谁**」的**唯一真相**：一行 = 一次招聘，
+      带该次招聘的所在地（省/市）、薪资、原始链接，重复出现累加 `hit_count`。
+
+    所以「同名不同公司」= **1 条岗位 + N 条关联**（不再像 P2 那样落成 N 条岗位，
+    避免把最贵的角色级内容按公司数复制）。`job_profiles.company_id` 已不再写入
+    （任务 3 会删掉该列）。
     """
     raw_title = str(data.get("title") or "").strip()
     if not raw_title:
@@ -140,13 +137,20 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
     title = raw_title[:200]
     title_key = normalise_title(title)
 
+    # 招聘所在地（省/市）：清洗占位值（现有 82 行的 city 是「未知」，不能当真实地域）
+    region = _clean_geo(data.get("region"))
+    city = _clean_geo(data.get("city"))
+
     company = await upsert_company(
-        session, data.get("company"), industry=data.get("industry"), city=data.get("city")
+        session,
+        data.get("company"),
+        industry=data.get("industry"),
+        city=city,
+        region=region,
+        scale=data.get("scale"),
     )
 
-    existing, adopt_company = await _find_profile(
-        session, title_key, company.id if company is not None else None
-    )
+    existing = await _find_profile(session, title_key)
 
     # ── 岗位信息 vs 岗位画像（用户 2026-09-27 要求：必须分开）───────────────────
     # `career_path` / `transition_paths` / `certificates` 是**岗位信息**，一律由源文本
@@ -173,10 +177,6 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
                 setattr(existing, column, items)
         # 画像字段交给独立写入器（白名单，只碰 PORTRAIT_FIELDS）
         apply_job_portrait(existing, data)
-        if company is not None and (adopt_company or existing.company_id is None):
-            # 收养"公司未知"的同名画像：把公司落定，让键从 (title, NULL) 变成 (title, 公司)。
-            # 只在精确键不存在时才走到这里，故不会撞唯一索引（并发竞态由调用方重试兜底）。
-            existing.company_id = company.id
         profile, created = existing, False
     else:
         profile = JobProfile(
@@ -191,7 +191,8 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
             career_path=career_facts.get("career_path") or None,
             transition_paths=career_facts.get("transition_paths") or None,
             certificates=career_facts.get("certificates") or None,
-            company_id=company.id if company is not None else None,
+            # ⚠️ 不写 `company_id`：岗位是角色级的，公司归属全在 `job_company_links`。
+            #    该列已废弃（任务 3 删掉），留着只会造成"两个真相来源"。
         )
         # 画像字段仍走同一个白名单写入器，保证"新建"和"更新"两条路的口径一致
         apply_job_portrait(profile, data)
@@ -201,12 +202,16 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
     await session.flush()
 
     if company is not None:
-        # 关联表是「岗位 ↔ 公司」的真相来源；计数按它重算
+        # 关联表是「谁在招谁」的**唯一真相**；一次招聘自带所在地/薪资/链接
         await link_job_company(
             session,
             job_profile_id=profile.id,
             company_id=company.id,
             source=str(data.get("source") or "import")[:20],
+            region=region,
+            city=city,
+            salary=data.get("salary"),
+            source_url=data.get("source_url"),
         )
         await refresh_job_count(session, company.id)
     return profile, created
@@ -241,9 +246,9 @@ async def persist_import_rows(
         written = False
         created = False
         last_exc: Exception | None = None
-        # P2：唯一索引 `uq_job_profiles_title_company` 会让**并发**写入同一
-        # `(岗位名, 公司)` 的第二条抛 IntegrityError。这与"这行数据脏"不是一回事：
-        # savepoint 回滚后重查一次即可转成 update（赢家那条已经落定）。
+        # 唯一索引 `uq_job_profiles_title_company` 会让**并发**写入同一岗位名的第二条
+        # 抛 IntegrityError。这与"这行数据脏"不是一回事：savepoint 回滚后重查一次
+        # 即可转成 update（赢家那条已经落定）。
         for attempt in (1, 2):
             try:
                 async with session.begin_nested():  # 行级 SAVEPOINT

@@ -117,10 +117,19 @@ class TestBackfilledData:
         return asyncio.run(_query())
 
     def test_all_profiles_have_career_path_and_certificates(self):
-        profiles, _ = self._load()
+        """**导入进来的**岗位都要有三列。
+
+        ⚠️ 只检查"有同名 `job_raw_data` 行"的岗位（= 真导入数据）：测试自己 upsert 出来
+        的岗位没有原始行，不该被这条断言波及（否则一跑测试就红，属测试卫生问题）。
+        """
+        profiles, raws = self._load()
         if not profiles:
             pytest.skip("库里没有岗位数据")
-        for profile in profiles:
+        raw_titles = {raw.title for raw in raws}
+        imported = [p for p in profiles if p.title in raw_titles]
+        if not imported:
+            pytest.skip("库里没有可追溯的导入岗位")
+        for profile in imported:
             assert isinstance(profile.career_path, list), f"{profile.title} 的 career_path 不是数组"
             assert profile.career_path, f"{profile.title} 的 career_path 为空"
             assert isinstance(profile.certificates, list), f"{profile.title} 的 certificates 不是数组"

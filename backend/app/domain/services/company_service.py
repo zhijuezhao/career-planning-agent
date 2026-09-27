@@ -40,10 +40,12 @@ async def upsert_company(
     *,
     industry: str | None = None,
     city: str | None = None,
+    region: str | None = None,
+    scale: str | None = None,
 ) -> Company | None:
     """按 name 取公司，没有则建。
 
-    industry / city **只在公司行为空时补全**：这两个字段允许管理端手工修正，
+    industry / city / region / scale **只在公司行为空时补全**：这些字段允许管理端手工修正，
     后续导入不应把它们覆盖回去。
     """
     clean = normalise_company_name(name)
@@ -59,6 +61,8 @@ async def upsert_company(
             name=clean,
             industry=(industry or None),
             city=(city or None),
+            region=(region or None),
+            scale=(scale or None),
             job_count=0,
         )
         session.add(company)
@@ -66,10 +70,14 @@ async def upsert_company(
         logger.info("公司表新增 | id={} | name={!r}", company.id, clean)
         return company
 
-    if industry and not company.industry:
-        company.industry = industry
-    if city and not company.city:
-        company.city = city
+    for field, value in (
+        ("industry", industry),
+        ("city", city),
+        ("region", region),
+        ("scale", scale),
+    ):
+        if value and not getattr(company, field):
+            setattr(company, field, value)
     return company
 
 
@@ -79,8 +87,19 @@ async def link_job_company(
     job_profile_id: int,
     company_id: int,
     source: str = "import",
+    region: str | None = None,
+    city: str | None = None,
+    salary: str | None = None,
+    source_url: str | None = None,
 ) -> JobCompanyLink:
-    """建立/更新「岗位 ↔ 公司」关联（幂等；重复出现时累加 hit_count）。"""
+    """建立/更新「岗位 ↔ 公司」关联（幂等；重复出现时累加 hit_count）。
+
+    这张表是「**谁在招谁**」的**唯一真相**（岗位↔公司 多对多）。每条关联 = **一次招聘**，
+    所以招聘所在地（省/市）、薪资、原始链接挂在这里 —— 同一个岗位角色在不同公司在招时，
+    这三项必然不同。
+
+    取值策略：**非空的新值覆盖旧值**（表格是这次招聘的事实来源），空值不覆盖。
+    """
     link = (
         await session.execute(
             select(JobCompanyLink).where(
@@ -96,6 +115,10 @@ async def link_job_company(
             company_id=company_id,
             source=source,
             hit_count=1,
+            region=(region or None),
+            city=(city or None),
+            salary=(salary or None),
+            source_url=(source_url or None),
         )
         session.add(link)
         await session.flush()
@@ -104,6 +127,14 @@ async def link_job_company(
         )
         return link
 
+    for field, value in (
+        ("region", region),
+        ("city", city),
+        ("salary", salary),
+        ("source_url", source_url),
+    ):
+        if value:
+            setattr(link, field, value)
     link.hit_count += 1
     link.last_seen_at = func.now()
     return link
@@ -129,43 +160,6 @@ async def refresh_job_count(session: AsyncSession, company_id: int) -> int:
     return count
 
 
-async def backfill_links_from_profiles(session: AsyncSession) -> int:
-    """把历史上只有 `job_profiles.company_id` 的关联补进关联表（幂等）。
-
-    用于 B2-5 上线：早先导入的岗位只记了"主公司"，没有关联行 ——
-    不补的话这两个查询会漏掉它们。
-    """
-    rows = (
-        await session.execute(
-            select(JobProfile.id, JobProfile.company_id).where(JobProfile.company_id.isnot(None))
-        )
-    ).all()
-
-    existing = {
-        (link.job_profile_id, link.company_id)
-        for link in (await session.execute(select(JobCompanyLink))).scalars().all()
-    }
-
-    created = 0
-    for job_profile_id, company_id in rows:
-        if (job_profile_id, company_id) in existing:
-            continue
-        session.add(
-            JobCompanyLink(
-                job_profile_id=job_profile_id,
-                company_id=company_id,
-                source="backfill",
-                hit_count=1,
-            )
-        )
-        created += 1
-
-    if created:
-        await session.flush()
-        logger.info("岗位↔公司关联回填 | created={}", created)
-    return created
-
-
 async def sync_all_job_counts(session: AsyncSession) -> int:
     """全量重算所有公司的 job_count（修数 / 人工改过关联后用）。"""
     companies = list((await session.execute(select(Company))).scalars().all())
@@ -175,7 +169,6 @@ async def sync_all_job_counts(session: AsyncSession) -> int:
 
 
 __all__ = [
-    "backfill_links_from_profiles",
     "company_job_count",
     "link_job_company",
     "normalise_company_name",

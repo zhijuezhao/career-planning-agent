@@ -108,11 +108,18 @@ class JobProfileResponse(BaseModel):
 
 
 class JobCompanyLinkInfo(BaseModel):
-    """岗位详情里的「在招公司」条目（B2-5）。"""
+    """岗位详情里的「在招公司」条目（B2-5；2026-09-27 任务 2 起 = 关联表一条 = 一次招聘）。"""
     company_id: int
     company_name: str
     industry: str | None = None
+    #: 公司规模（如 `1000-9999人`）
+    scale: str | None = None
+    #: 地域：优先用**这次招聘**的所在地，缺失才回落到公司属性
+    region: str | None = None
     city: str | None = None
+    #: 本次招聘的薪资 / 原始链接
+    salary: str | None = None
+    source_url: str | None = None
     hit_count: int = 1
     last_seen_at: datetime | None = None
     is_primary: bool = False

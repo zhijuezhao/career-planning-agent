@@ -19,7 +19,7 @@ from app.domain.models.company import Company
 from app.domain.models.job import JobProfile
 from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.models.user import User
-from app.domain.services.company_service import backfill_links_from_profiles, sync_all_job_counts
+from app.domain.services.company_service import sync_all_job_counts
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
     CompanyDetail,
@@ -167,18 +167,18 @@ async def sync_companies(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """修数口子：先把历史关联回填进 `job_company_links`，再按关联表全量重算 `job_count`。
+    """修数口子：按关联表全量重算 `job_count`。
 
-    回填是幂等的（已存在的组合跳过），重复点不会产生重复行；B2-5 之前导入的岗位
-    只记了 `job_profiles.company_id`，不补关联的话两个方向的查询都会漏掉它们。
+    2026-09-27 任务 2 起，「谁在招谁」的唯一真相就是 `job_company_links`，
+    `job_profiles.company_id` 不再写入 → 原先那个"把 `company_id` 回填进关联表"的步骤
+    已无对象可回填，故移除（`links_created` 恒为 0，仅为兼容旧前端保留字段）。
     """
-    links_created = await backfill_links_from_profiles(db)
     synced = await sync_all_job_counts(db)
     await db.flush()
     with_jobs = (
         await db.execute(select(func.count()).select_from(Company).where(Company.job_count > 0))
     ).scalar() or 0
-    return CompanySyncResponse(synced=synced, with_jobs=with_jobs, links_created=links_created)
+    return CompanySyncResponse(synced=synced, with_jobs=with_jobs, links_created=0)
 
 
 __all__ = ["router"]

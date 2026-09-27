@@ -18,7 +18,7 @@ from app.core.chat.workflows import (
     classify_title,
     job_catalog,
 )
-from app.domain.models.job import JobProfile
+from app.domain.models.job import JobProfile, JobRawData
 from sqlalchemy import func, select
 from tests.conftest import test_session_factory
 
@@ -47,19 +47,28 @@ class TestClassifyTitle:
         assert classify_title("完全不认识的名字") == OTHER_CATEGORY
 
     def test_every_real_title_is_classified(self):
-        """库里**每一条真实岗位名**都必须归类成功。
+        """**导入进来的**每一条岗位名都必须归类成功。
 
         这个断言会跟着数据走：用户以后导入新岗位时，如果有名字归不进任何类，
         这里会红 —— 那是提醒"该给 ``TITLE_CATEGORIES`` 加关键词了"，而不是代码坏了。
+
+        ⚠️ 只看"有同名 `job_raw_data` 行"的岗位（= 真导入数据）：测试自己 upsert 出来的
+        岗位（`b22_*` 之类）没有原始行，不该被这条断言波及。
         """
 
         async def _titles() -> list[str]:
             async with test_session_factory() as session:
-                return list((await session.execute(select(JobProfile.title))).scalars().all())
+                raw_titles = set(
+                    (await session.execute(select(JobRawData.title))).scalars().all()
+                )
+                profile_titles = list(
+                    (await session.execute(select(JobProfile.title))).scalars().all()
+                )
+                return [t for t in profile_titles if t in raw_titles]
 
         titles = asyncio.run(_titles())
         if not titles:
-            pytest.skip("库里没有岗位数据")
+            pytest.skip("库里没有可追溯的导入岗位")
 
         unclassified = [t for t in titles if classify_title(t) == OTHER_CATEGORY]
         assert unclassified == [], f"这些岗位名没被归类：{unclassified}"

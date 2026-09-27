@@ -34,6 +34,28 @@ DEFAULT_COLUMN_MAPPING: dict[str, str] = {
     "岗位编码": "code",
     "职位编码": "code",
     "职位ID": "code",
+    # ── 岗位↔公司 多对多模型（2026-09-27）需要的列 ────────────────────────────────
+    # 地域做成**省市两级**（管理端先选省、再选市）；省份与城市分开识别，别只认「城市」。
+    "省份": "region",
+    "省": "region",
+    "所在省份": "region",
+    "所在地区": "region",
+    "地区": "region",
+    "地域": "region",
+    # 公司规模（存原文，如 `1000-9999人`）
+    "公司规模": "scale",
+    "企业规模": "scale",
+    "人员规模": "scale",
+    "规模": "scale",
+    # 原始链接（B3 链接富化与「岗位来源」展示要用）
+    "岗位链接": "source_url",
+    "职位链接": "source_url",
+    "招聘链接": "source_url",
+    "详情链接": "source_url",
+    "来源链接": "source_url",
+    "链接": "source_url",
+    "URL": "source_url",
+    "url": "source_url",
 }
 
 

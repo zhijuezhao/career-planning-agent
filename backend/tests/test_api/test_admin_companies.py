@@ -11,6 +11,7 @@ import time
 
 import pytest
 from app.domain.models.company import Company
+from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.services.job_persist_service import upsert_job_profile
 from app.main import app
 from fastapi.testclient import TestClient
@@ -93,12 +94,11 @@ def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _seed_same_title() -> dict[str, int]:
-    """同一岗位名被两家公司招（B2-5 场景）：返回两家公司各自的画像 id + 公司 id。
+async def _seed_same_title() -> dict[str, object]:
+    """同一岗位名被两家公司招（B2-5 场景）：返回**那一条岗位** id + 两家公司 id。
 
-    **P2 起语义变了**：去重粒度是 `(岗位名, 公司)`，所以这不再是"1 条画像 + 2 条关联"，
-    而是**2 条画像**（每家一条）。B2-5 的"在招公司/company_count"读侧按 `title_key`
-    汇总同名画像，所以对使用者来说能力不变。
+    **任务 2（2026-09-27）起是多对多**：岗位是**角色级**的 → 这里落 **1 条岗位**
+    + **2 条在招关联**（不再是 P2 时代"每家一条画像"）。
 
     用独立子前缀（`<prefix>-L`），避免污染其它用例对 `_company("")` 前缀的精确断言。
     """
@@ -109,7 +109,16 @@ async def _seed_same_title() -> dict[str, int]:
         profile_a, _ = await upsert_job_profile(
             session, {"title": title, "company": name_a, "industry": "互联网"}
         )
-        profile_b, _ = await upsert_job_profile(session, {"title": title, "company": name_b})
+        profile_b, _ = await upsert_job_profile(
+            session,
+            {
+                "title": title,
+                "company": name_b,
+                "region": "广东",
+                "city": "深圳",
+                "salary": "25-40K",
+            },
+        )
         await session.commit()
 
         company_ids = {}
@@ -117,10 +126,12 @@ async def _seed_same_title() -> dict[str, int]:
             company_ids[name] = (
                 await session.execute(select(Company.id).where(Company.name == name))
             ).scalar_one()
+        # 多对多：第二次是**同一条**岗位（只是多一家在招）
+        # 注：本模块的清理是 module 级的 → 同一次 pytest 里本函数可能被多次调用，
+        #     所以只看"是不是同一条"，不断言 created（第二次起必然是 update）。
+        assert profile_a.id == profile_b.id
         return {
             "job_id": int(profile_a.id),
-            "job_id_a": int(profile_a.id),
-            "job_id_b": int(profile_b.id),
             "company_a": company_ids[name_a],
             "company_b": company_ids[name_b],
             "name_a": name_a,
@@ -129,13 +140,13 @@ async def _seed_same_title() -> dict[str, int]:
 
 
 class TestJobCompanyLinksAPI:
-    """B2-5 的两个查询方向 + P2 的"同名多公司"读侧汇总（管理端接口）。"""
+    """B2-5 的两个查询方向（管理端接口）。任务 2 起底层是多对多：1 条岗位 ↔ N 家公司。"""
 
-    def test_jobs_filter_finds_each_companys_own_profile(self, client, admin_token):
+    def test_jobs_filter_finds_the_shared_profile(self, client, admin_token):
+        """按公司筛选走关联表：**两家公司筛出来的是同一条岗位**（角色级）。"""
         seeded = asyncio.run(_seed_same_title())
 
-        # P2：每家公司在库里有自己的那条画像（不再是共用一条）
-        for key, job_key in (("company_a", "job_id_a"), ("company_b", "job_id_b")):
+        for key in ("company_a", "company_b"):
             resp = client.get(
                 "/api/v1/admin/jobs",
                 params={"company_id": seeded[key]},
@@ -143,13 +154,13 @@ class TestJobCompanyLinksAPI:
             )
             assert resp.status_code == 200, resp.text
             items = resp.json()["items"]
-            assert seeded[job_key] in [i["id"] for i in items], key
-            assert all(i["company_id"] == seeded[key] for i in items), key
-
-        assert seeded["job_id_a"] != seeded["job_id_b"]
+            assert [i["id"] for i in items] == [seeded["job_id"]], key
+            # 岗位行不再挂公司（角色级）："在招公司"看 company_name / company_count
+            assert items[0]["company_id"] is None, key
+            assert items[0]["company_count"] == 2, key
 
     def test_job_list_exposes_company_count(self, client, admin_token):
-        """`company_count` = **同名岗位下有多少家公司**（按 title_key 汇总）。"""
+        """`company_count` = 这个岗位**有多少家公司在招**（直接数关联表）。"""
         seeded = asyncio.run(_seed_same_title())
         resp = client.get(
             "/api/v1/admin/jobs",
@@ -158,6 +169,7 @@ class TestJobCompanyLinksAPI:
         )
         item = next(i for i in resp.json()["items"] if i["id"] == seeded["job_id"])
         assert item["company_count"] == 2
+        assert item["company_name"] == seeded["name_a"]  # 展示名 = 最早建立关联的那家
 
     def test_job_detail_lists_all_hiring_companies(self, client, admin_token):
         seeded = asyncio.run(_seed_same_title())
@@ -169,10 +181,14 @@ class TestJobCompanyLinksAPI:
         assert data["company_count"] == 2
         names = {c["company_name"] for c in data["companies"]}
         assert names == {seeded["name_a"], seeded["name_b"]}
+        # 多对多下没有"主公司"概念：`is_primary` = **最早建立关联**的那一条
         primaries = [c for c in data["companies"] if c["is_primary"]]
         assert len(primaries) == 1
-        # 主公司 = 这条画像自己的公司（P2：不再是"首次那家"）
-        assert primaries[0]["company_id"] == data["company_id"] == seeded["company_a"]
+        assert primaries[0]["company_id"] == seeded["company_a"]
+        assert data["company_id"] is None
+        # 每条关联自带**这次招聘**的所在地/薪资
+        b = next(c for c in data["companies"] if c["company_id"] == seeded["company_b"])
+        assert (b["region"], b["city"], b["salary"]) == ("广东", "深圳", "25-40K")
 
     def test_company_detail_shows_linked_jobs(self, client, admin_token):
         seeded = asyncio.run(_seed_same_title())
@@ -182,8 +198,8 @@ class TestJobCompanyLinksAPI:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["job_count"] == 1
-        # P2：乙公司名下是它自己那条同名画像
-        assert [j["id"] for j in data["jobs"]] == [seeded["job_id_b"]]
+        # 两家公司名下都是**同一条**岗位（角色级）
+        assert [j["id"] for j in data["jobs"]] == [seeded["job_id"]]
 
     def test_sync_backfills_links_and_reports_count(self, client, admin_token):
         resp = client.post("/api/v1/admin/companies/sync", headers=_headers(admin_token))
@@ -317,15 +333,29 @@ class TestCompanyWrite:
 
 class TestCompanyDeleteKeepsJobs:
     def test_delete_unbinds_jobs(self, client: TestClient, admin_token: str):
-        """删除公司不得删岗位：外键 ON DELETE SET NULL，只解绑。"""
+        """删除公司不得删岗位：关联行随公司 CASCADE 消失，**岗位本身留着**。
+
+        任务 2 起岗位是角色级的（`job_profiles.company_id` 已不再写入），所以"解绑"
+        就是"关联行没了、岗位还在" —— 这也正是 P2 时代那个"删第二家公司撞唯一索引 → 500"
+        隐患消失的原因。
+        """
+        title = f"{_PREFIX}_待解绑岗位"
+        company_name = _company("待删公司")
 
         async def _seed_one() -> tuple[int, int]:
             async with test_session_factory() as session:
                 profile, _ = await upsert_job_profile(
-                    session, {"title": _title("待解绑岗位"), "company": _company("待删公司")}
+                    session, {"title": title, "company": company_name}
                 )
                 await session.commit()
-                return int(profile.id), int(profile.company_id or 0)
+                link = (
+                    await session.execute(
+                        select(JobCompanyLink).where(
+                            JobCompanyLink.job_profile_id == profile.id
+                        )
+                    )
+                ).scalar_one()
+                return int(profile.id), int(link.company_id)
 
         profile_id, company_id = asyncio.run(_seed_one())
 
@@ -334,28 +364,34 @@ class TestCompanyDeleteKeepsJobs:
         )
         assert resp.status_code == 204
 
-        async def _company_id_of_profile() -> tuple[bool, int | None]:
+        async def _state() -> tuple[bool, int]:
             async with test_session_factory() as session:
-                row = (
-                    await session.execute(
-                        text("SELECT company_id FROM job_profiles WHERE id = :i"),
-                        {"i": profile_id},
-                    )
-                ).scalar_one_or_none()
                 exists = (
                     await session.execute(
                         text("SELECT count(*) FROM companies WHERE id = :i"), {"i": company_id}
                     )
                 ).scalar_one()
-                return bool(exists), row
+                links = (
+                    await session.execute(
+                        text(
+                            "SELECT count(*) FROM job_company_links WHERE job_profile_id = :i"
+                        ),
+                        {"i": profile_id},
+                    )
+                ).scalar_one()
+                return bool(exists), int(links)
 
-        company_exists, profile_company_id = asyncio.run(_company_id_of_profile())
+        company_exists, link_count = asyncio.run(_state())
         assert company_exists is False  # 公司没了
-        assert profile_company_id is None  # 岗位还在，只是解绑
+        assert link_count == 0  # 关联行随公司 CASCADE 消失
 
-        resp = client.get(f"/api/v1/admin/jobs/{profile_id}", headers=_headers(admin_token))
-        assert resp.status_code == 200
-        assert resp.json()["company_id"] is None
+        # 岗位还在，且"在招公司"变空
+        detail = client.get(
+            f"/api/v1/admin/jobs/{profile_id}", headers=_headers(admin_token)
+        )
+        assert detail.status_code == 200
+        assert detail.json()["company_count"] == 0
+        assert detail.json()["companies"] == []
 
 
 class TestJobDeleteRefreshesCompanyCount:
@@ -366,14 +402,23 @@ class TestJobDeleteRefreshesCompanyCount:
         `companies.job_count` 是**冗余列**，不重算就虚高 —— 公司页正按它排序、
         `only_with_jobs` 也按它过滤，虚高会让"没有在招岗位的公司"继续显示。
         """
+        title = f"{_PREFIX}_删后计数岗位"
+        company_name = _company("删后计数公司")
 
         async def _seed_one() -> tuple[int, int, int]:
             async with test_session_factory() as session:
                 profile, _ = await upsert_job_profile(
-                    session, {"title": _title("删后计数岗位"), "company": _company("删后计数公司")}
+                    session, {"title": title, "company": company_name}
                 )
                 await session.commit()
-                company_id = int(profile.company_id or 0)
+                link = (
+                    await session.execute(
+                        select(JobCompanyLink).where(
+                            JobCompanyLink.job_profile_id == profile.id
+                        )
+                    )
+                ).scalar_one()
+                company_id = int(link.company_id)
                 count = (
                     await session.execute(
                         text("SELECT job_count FROM companies WHERE id = :i"), {"i": company_id}
@@ -412,8 +457,10 @@ class TestJobsFilterByCompany:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["total"] == 2
-        assert all(item["company_id"] == company_id for item in data["items"])
+        # 岗位是角色级的 → 行上没有 company_id；展示名来自关联表里最早的那家
+        assert all(item["company_id"] is None for item in data["items"])
         assert all(item["company_name"] == _company("甲") for item in data["items"])
+        assert all(item["company_count"] == 1 for item in data["items"])
 
     def test_jobs_without_company_filter_still_works(self, client: TestClient, admin_token: str):
         resp = client.get("/api/v1/admin/jobs", params={"limit": 1}, headers=_headers(admin_token))
