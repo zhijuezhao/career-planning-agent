@@ -125,6 +125,9 @@ async function copy(text: string, label: string) {
       <el-tab-pane label="预览" name="preview">
         <div class="dd-body" :style="{ maxHeight }">
           <MarkdownPreview :text="markdown" :empty-text="emptyText" />
+          <!-- 可选附加区（C1：对话记录用它渲染后端下发的图表）。
+               不传这个 slot 的调用方**完全不受影响**（不渲染任何额外节点）。 -->
+          <slot name="preview-extra" />
         </div>
       </el-tab-pane>
 

@@ -269,6 +269,13 @@ COLUMN_SPECS: tuple[ColumnSpec, ...] = (
         "ALTER TABLE job_profiles ADD COLUMN IF NOT EXISTS title_key VARCHAR(200) "
         "GENERATED ALWAYS AS (lower(regexp_replace(btrim(title), '\\s+', ' ', 'g'))) STORED",
     ),
+    # C1（2026-09-27，§11.1 的 ⑤）：助手消息的可视化载荷。
+    # **数组**语义（一条消息可以有多个图），契约见 `app/core/chat/viz.py`；无图时 NULL。
+    ColumnSpec(
+        "chat_messages",
+        "viz",
+        "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS viz JSONB",
+    ),
 )
 
 CONSTRAINT_SPECS: tuple[ConstraintSpec, ...] = (

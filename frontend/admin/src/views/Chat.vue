@@ -5,11 +5,16 @@
  * 本轮只做两件事（其他字段按需求「暂不修改」）：
  * 1. 筛选：时间范围（两个 tab 都有）+ 消息的角色 / 关键字；
  * 2. 消息内容改为「摘要 + 预览卡」—— 统一用 `DetailDialog`（Markdown 预览 + JSON）。
+ *
+ * C1（2026-09-27）追加：助手消息可能带 `viz`（后端下发的图表，契约见
+ * `backend/app/core/chat/viz.py`）→ 列表给一个数量标签，预览卡里用 `VizPreview` 渲染。
+ * 这是 C1 的前端**挂载点 A**：学生端 chat 在他人重构中（不动清单），所以先在管理端
+ * 只读页把"图和数据都对得上"这件事做实。
  */
 import { onMounted, reactive, ref } from 'vue'
 import { get } from '@/api/request'
-import { DetailDialog } from '@/components'
-import type { DetailTag } from '@/components'
+import { DetailDialog, VizPreview } from '@/components'
+import type { DetailTag, VizSpec } from '@/components'
 import { formatDateTime } from '@/utils/preview'
 
 interface ChatSession {
@@ -28,6 +33,8 @@ interface ChatMessage {
   content: string
   tokens_used: number
   model_used: string | null
+  /** C1：后端下发的可视化载荷（数组）；C1 之前的消息为 null */
+  viz?: VizSpec[] | null
   created_at: string
 }
 
@@ -147,6 +154,8 @@ const detailSubtitle = ref('')
 const detailTags = ref<DetailTag[]>([])
 const detailMarkdown = ref('')
 const detailJson = ref<unknown>(undefined)
+/** C1：当前预览消息的图表（没有就是空数组 → `VizPreview` 自己不渲染任何东西） */
+const detailViz = ref<VizSpec[]>([])
 
 const openMessage = (row: ChatMessage) => {
   detailTitle.value = `对话消息 #${row.id}`
@@ -156,9 +165,11 @@ const openMessage = (row: ChatMessage) => {
   ]
   if (row.model_used) tags.push({ text: row.model_used, type: 'info' })
   tags.push({ text: `${row.tokens_used} tokens`, type: 'info' })
+  if (row.viz?.length) tags.push({ text: `${row.viz.length} 个图`, type: 'warning' })
   detailTags.value = tags
   detailMarkdown.value = row.content
   detailJson.value = row
+  detailViz.value = row.viz ?? []
   detailVisible.value = true
 }
 
@@ -253,6 +264,14 @@ onMounted(fetchSessions)
               </template>
             </el-table-column>
             <el-table-column prop="model_used" label="模型" width="120" show-overflow-tooltip />
+            <el-table-column label="图" width="60">
+              <template #default="{ row }">
+                <el-tag v-if="row.viz?.length" size="small" type="warning">
+                  {{ row.viz.length }}
+                </el-tag>
+                <span v-else class="muted">-</span>
+              </template>
+            </el-table-column>
             <el-table-column label="Token" width="80">
               <template #default="{ row }">{{ row.tokens_used }}</template>
             </el-table-column>
@@ -285,7 +304,12 @@ onMounted(fetchSessions)
       :json="detailJson"
       width="860px"
       empty-text="（该消息内容为空）"
-    />
+    >
+      <!-- C1 挂载点 A：把后端 `viz` 渲染成表格/图表 -->
+      <template #preview-extra>
+        <VizPreview :items="detailViz" />
+      </template>
+    </DetailDialog>
   </div>
 </template>
 
@@ -314,5 +338,9 @@ onMounted(fetchSessions)
 
 .content-preview {
   color: #606266;
+}
+
+.muted {
+  color: #c0c4cc;
 }
 </style>

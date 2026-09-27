@@ -94,13 +94,21 @@ async def save_chat_message(
     content: str,
     tokens_used: int = 0,
     model_used: str | None = None,
+    viz: list[dict] | None = None,
 ) -> ChatMessage:
+    """落库一条消息。
+
+    Args:
+        viz: C1 的可视化载荷（**列表**，契约见 ``app/core/chat/viz.py``）。
+            刷新会话后图表要能恢复，所以必须落库 —— 这正是加这一列的原因。
+    """
     msg = ChatMessage(
         session_id=session_id,
         role=role,
         content=content,
         tokens_used=tokens_used,
         model_used=model_used,
+        viz=viz,
     )
     session.add(msg)
     await session.flush()

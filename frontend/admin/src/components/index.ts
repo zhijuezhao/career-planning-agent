@@ -11,5 +11,7 @@
 
 export { default as DetailDialog } from './DetailDialog.vue'
 export { default as MarkdownPreview } from './MarkdownPreview.vue'
+export { default as VizPreview } from './VizPreview.vue'
 
 export type { DetailTag, DetailTagType } from './DetailDialog.vue'
+export type { VizSpec } from './VizPreview.vue'

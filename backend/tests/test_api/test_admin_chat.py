@@ -1,4 +1,6 @@
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 from app.main import app
 from fastapi.testclient import TestClient
@@ -59,6 +61,65 @@ class TestChatMessagesAPI:
             headers={"Authorization": f"Bearer {admin_token}"},
         )
         assert resp.status_code == 404
+
+
+class TestChatVizExposureC1:
+    """C1：L1 工作流产出的 viz，管理端「对话记录」必须读得到。
+
+    这条链路就是**挂载点 A 的数据源**：学生端提问 → L1 命中工作流 → viz 落库 →
+    管理端拿 `GET /admin/chat/messages?session_id=...` 渲染图表。
+    """
+
+    def test_workflow_viz_reaches_admin_message_list(
+        self, student_token: str, admin_token: str, client: TestClient
+    ):
+        created = client.post(
+            "/api/v1/chat/sessions",
+            json={"title": "C1 viz 落库验证"},
+            headers={"Authorization": f"Bearer {student_token}"},
+        )
+        assert created.status_code == 201, created.text
+        sid = created.json()["id"]
+
+        mock_gateway = MagicMock()
+        mock_gateway.current_model = "deepseek"
+        with patch("app.api.v1.chat.get_llm_gateway", return_value=mock_gateway), patch(
+            "app.api.v1.chat.compile_agent"
+        ) as mock_compile:
+            resp = client.post(
+                f"/api/v1/chat/sessions/{sid}/messages",
+                json={"content": "有哪些岗位"},
+                headers={"Authorization": f"Bearer {student_token}"},
+            )
+            mock_compile.assert_not_called()  # 0 token 路径不进 agent
+        assert resp.status_code == 200, resp.text
+
+        listing = client.get(
+            f"/api/v1/admin/chat/messages?session_id={sid}",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert listing.status_code == 200, listing.text
+        assistant = [i for i in listing.json()["items"] if i["role"] == "assistant"]
+        assert assistant, "助手消息没落库"
+
+        viz = assistant[0]["viz"]
+        assert isinstance(viz, list) and viz, "管理端读不到 viz"
+        assert viz[0]["kind"] == "table"
+        assert viz[0]["columns"] == ["#", "岗位名称"]
+        # 管理端还能看到"这条是工作流答的、没花 token"
+        assert assistant[0]["model_used"].startswith("workflow:")
+        assert assistant[0]["tokens_used"] == 0
+
+    def test_messages_without_viz_are_null(self, admin_token: str, client: TestClient):
+        """老消息（C1 之前）没有 viz 字段值 → 必须是 null，不能是 [] 之外的怪东西。"""
+        resp = client.get(
+            "/api/v1/admin/chat/messages?limit=100",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        for item in resp.json()["items"]:
+            assert "viz" in item
+            assert item["viz"] is None or isinstance(item["viz"], list)
 
 
 class TestChatAPIAuth:

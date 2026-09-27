@@ -15,6 +15,9 @@ from app.config import get_settings
 from app.core.agent.langgraph_agent import compile_agent
 from app.core.agent.nodes import AgentState
 from app.core.agent.tools import get_agent_tools
+from app.core.chat.router import route
+from app.core.chat.viz import normalise_viz
+from app.core.chat.workflows import WorkflowContext, run_workflow
 from app.core.llm.gateway import LLMGatewayError, get_llm_gateway
 from app.core.safety.filter import append_disclaimer, check_content
 from app.domain.models.user import User
@@ -130,13 +133,18 @@ async def api_send_message(
     - ``{"type": "token", "content": "..."}`` — 文本增量（含最后追加的免责声明）
     - ``{"type": "tool", "phase": "start"|"end", "name": "..."}`` — **模型正在调用工具**
       （前端 switch 没有 default 分支 → 老版本前端会安全忽略它）
+    - ``{"type": "viz", "kind": "radar|bar|line|pie|table", ...}`` — **可视化载荷**（C1）
+      一条消息可以有多个；``kind`` 决定渲染方式（ECharts 图用 ``option``，表格用
+      ``columns`` + ``rows``）。契约见 ``app/core/chat/viz.py``。同样靠"未知类型忽略"
+      向后兼容。**同时落库**（``chat_messages.viz``），否则刷新后图就没了。
     - ``{"type": "done", "session_id": "...", "message_id": N}`` — 结束
     - ``{"type": "error", "content": "..."}`` — 出错
 
-    执行链（2026-09-25 修复"agent 链失效"）：
+    执行链（2026-09-25 修复"agent 链失效"；2026-09-27 C1 加 L1 路由与 viz）：
     ① 输入侧内容安全（确定性规则，命中即拒答、不调模型）；
-    ② ReAct agent：模型**自主决定**是否/如何调用工具（依赖经 ``configurable`` 逐次传入，
-       见 `app/core/agent/nodes.py` 顶部说明）；
+    ② **L1 意图路由**（``core/chat/router.py``，纯规则、0 token）：命中 → 跑
+       **确定型工作流**（``core/chat/workflows.py``，只查 DB），**完全不碰模型**；
+       未命中 → ReAct agent（模型自主决定是否/如何调用工具）；
     ③ 输出侧合规：追加免责声明（幂等），命中违规规则时额外提示并记 warning。
     """
     chat_session = await get_chat_session(db, session_id, current_user.id)
@@ -149,9 +157,14 @@ async def api_send_message(
 
     gateway = get_llm_gateway()
     settings_obj = get_settings()
+    # L1 路由：纯函数、无 I/O、0 token。命中就**不建 agent、不调模型**（§11 原则）
+    decision = route(data.content)
 
     async def event_stream():
         assistant_content = ""
+        assistant_viz: list[dict[str, Any]] | None = None
+        # 落库的 model_used：工作流答的会写成 "workflow:<名字>"，管理端一眼能分辨
+        model_used: str | None = gateway.current_model
         message_id: int | None = None
 
         async def save_assistant() -> str:
@@ -163,7 +176,8 @@ async def api_send_message(
                 "assistant",
                 assistant_content,
                 tokens_used=0,
-                model_used=gateway.current_model,
+                model_used=model_used,
+                viz=assistant_viz,
             )
             message_id = assistant_msg.id
             await db.commit()
@@ -186,6 +200,26 @@ async def api_send_message(
                     safety.violation_type,
                 )
                 yield _sse({"type": "token", "content": assistant_content})
+            elif decision.is_workflow:
+                # ── ②-L1 确定型工作流：0 token，**不进 agent**（§11 原则）──────────
+                result = await run_workflow(
+                    decision.workflow or "",
+                    db,
+                    WorkflowContext(params=decision.params, user_id=current_user.id),
+                )
+                assistant_content = result.text
+                assistant_viz = normalise_viz(result.viz) or None
+                model_used = f"workflow:{decision.workflow}"
+                logger.info(
+                    "Chat L1 命中工作流（0 token，未调模型）| session_id={} | rule={} | workflow={} | viz={}",
+                    session_id,
+                    decision.rule,
+                    decision.workflow,
+                    len(assistant_viz or []),
+                )
+                yield _sse({"type": "token", "content": assistant_content})
+                for item in assistant_viz or []:
+                    yield _sse({"type": "viz", **item})
             else:
                 # ── ② ReAct agent：模型自主决策调用哪些工具 ────────────────────
                 tools = get_agent_tools()

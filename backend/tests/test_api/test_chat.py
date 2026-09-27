@@ -374,6 +374,81 @@ class TestChatAPI:
         assistant_msgs = [m for m in detail["messages"] if m["role"] == "assistant"]
         assert assistant_msgs and "抱歉" in assistant_msgs[-1]["content"]
 
+    def test_send_message_l1_workflow_skips_agent_and_emits_viz(self, auth_setup):
+        """C1：L1 命中的问题 **0 token** —— 不进 agent、不取模型，并下发 viz。
+
+        这是"能走工作流就不用 agent"（§11 用户原话）的第一条可执行验收：
+        用 mock 盯着 `compile_agent` 与 `gateway.get_model`，两者都**不许被调用**。
+        """
+        sid = self._new_session(auth_setup, "L1 工作流会话")
+
+        mock_gateway = MagicMock()
+        mock_gateway.current_model = "deepseek"
+
+        with patch("app.api.v1.chat.get_llm_gateway", return_value=mock_gateway), patch(
+            "app.api.v1.chat.compile_agent"
+        ) as mock_compile:
+            resp = client.post(
+                f"/api/v1/chat/sessions/{sid}/messages",
+                json={"content": "有哪些岗位"},
+                headers={"Authorization": f"Bearer {auth_setup['token']}"},
+            )
+            # 关键断言：0 token 路径根本没碰模型
+            mock_compile.assert_not_called()
+            mock_gateway.get_model.assert_not_called()
+
+        assert resp.status_code == 200
+        events = self._events(resp)
+        assert [e["type"] for e in events if e["type"] == "done"] == ["done"]
+        assert any(e["type"] == "token" for e in events)
+
+        viz_events = [e for e in events if e["type"] == "viz"]
+        assert viz_events, "L1 工作流应该下发 viz 事件"
+        assert len(viz_events) >= 1
+        assert all({"kind", "title"} <= set(e) for e in viz_events)
+        assert "tool" not in {e["type"] for e in events}  # 没进 agent 就不会有工具事件
+
+        # 刷新后图还得在 —— 这正是要加 `chat_messages.viz` 这一列的原因
+        detail = client.get(
+            f"/api/v1/chat/sessions/{sid}",
+            headers={"Authorization": f"Bearer {auth_setup['token']}"},
+        ).json()
+        saved = [m for m in detail["messages"] if m["role"] == "assistant"][-1]
+        emitted = [{k: v for k, v in e.items() if k != "type"} for e in viz_events]
+        assert saved["viz"] == emitted  # 下发的 == 落库的
+        # 注：`tokens_used` / `model_used` 只在**管理端**的 message schema 里，
+        # 那两条断言放在 `test_admin_chat.py::TestChatVizExposureC1`。
+
+    def test_send_message_conditional_question_still_uses_agent(self, auth_setup):
+        """L1 规则是窄的：带过滤条件的问题（「现在有哪些前端岗位」）必须继续走 agent。
+
+        它和 `test_send_message_emits_tool_events` 用的是同一句话 —— 那条用例断言
+        "有 tool 事件"，这条断言"确实进了 agent"。两条一起把 L1 的边界钉住。
+        """
+
+        async def mock_astream_events(*args, **kwargs):
+            yield {"event": "on_chat_model_stream", "data": {"chunk": {"content": "好的"}}}
+
+        sid = self._new_session(auth_setup, "L1 边界会话")
+        mock_agent = MagicMock()
+        mock_agent.astream_events = mock_astream_events
+        mock_gateway = MagicMock()
+        mock_gateway.current_model = "deepseek"
+
+        with patch("app.api.v1.chat.get_llm_gateway", return_value=mock_gateway), patch(
+            "app.api.v1.chat.compile_agent", return_value=mock_agent
+        ) as mock_compile:
+            resp = client.post(
+                f"/api/v1/chat/sessions/{sid}/messages",
+                json={"content": "现在有哪些前端岗位"},
+                headers={"Authorization": f"Bearer {auth_setup['token']}"},
+            )
+            mock_compile.assert_called_once()  # 带条件的问法仍然交给 agent
+
+        assert resp.status_code == 200
+        events = self._events(resp)
+        assert not [e for e in events if e["type"] == "viz"]
+
     def test_send_message_emits_tool_events(self, auth_setup):
         """模型调用工具时 SSE 要发 `tool` 事件（前端据此显示"正在检索/生成…"）。"""
         sid = self._new_session(auth_setup, "工具事件会话")

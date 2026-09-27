@@ -27,6 +27,8 @@ class ChatMessageResponse(BaseModel):
     id: int
     role: str
     content: str
+    #: C1 可视化载荷（数组，契约见 `app/core/chat/viz.py`）；无图时为 None
+    viz: list[dict] | None = None
     created_at: datetime
     model_config = {"from_attributes": True}
 
