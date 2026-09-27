@@ -38,6 +38,9 @@ class JobProfile(Base):
     experience_requirement: Mapped[str | None] = mapped_column(String(100))
     career_path: Mapped[dict | None] = mapped_column(JSONB)
     transition_paths: Mapped[dict | None] = mapped_column(JSONB)
+    # P4a（2026-09-27）：所需证书。来源是职业发展路线表的「所需证书」列 ——
+    # 它此前**没有字段可落**（只并进了 requirements 文本），由 `career_fields.py` 确定性回填。
+    certificates: Mapped[list | None] = mapped_column(JSONB)
     requirement_intensity: Mapped[dict | None] = mapped_column(JSONB)
     outlook: Mapped[dict | None] = mapped_column(JSONB)
     summary: Mapped[str | None] = mapped_column(Text)

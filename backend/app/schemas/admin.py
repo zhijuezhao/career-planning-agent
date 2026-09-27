@@ -90,6 +90,8 @@ class JobProfileResponse(BaseModel):
     # 只收 dict 会让**整个岗位列表 500**（与上面 hard_skills 同一类问题，实测已复现）。
     career_path: dict | list | str | None
     transition_paths: dict | list | str | None
+    # P4a：所需证书（列表）。回填前为 None。
+    certificates: list | None = None
     requirement_intensity: dict | None
     outlook: dict | list | str | None
     summary: str | None
@@ -133,6 +135,7 @@ class JobProfileCreate(BaseModel):
     # 与 JobProfileResponse 一致：真实画像里这三种值可能是对象/数组/字符串。
     career_path: dict | list | str | None = None
     transition_paths: dict | list | str | None = None
+    certificates: list | None = None
     requirement_intensity: dict | None = None
     outlook: dict | list | str | None = None
     summary: str | None = None
@@ -151,6 +154,7 @@ class JobProfileUpdate(BaseModel):
     # 只收 dict 会让「编辑后保存」对真实数据 422。
     career_path: dict | list | str | None = None
     transition_paths: dict | list | str | None = None
+    certificates: list | None = None
     requirement_intensity: dict | None = None
     outlook: dict | list | str | None = None
     summary: str | None = None

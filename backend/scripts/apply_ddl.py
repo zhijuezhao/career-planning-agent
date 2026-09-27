@@ -276,6 +276,13 @@ COLUMN_SPECS: tuple[ColumnSpec, ...] = (
         "viz",
         "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS viz JSONB",
     ),
+    # P4a（2026-09-27）：「所需证书」此前**没有字段可落**（职业发展路线表的该列
+    # 只被并进 requirements 文本）。由 `scripts/backfill_career_fields.py` 确定性回填。
+    ColumnSpec(
+        "job_profiles",
+        "certificates",
+        "ALTER TABLE job_profiles ADD COLUMN IF NOT EXISTS certificates JSONB",
+    ),
 )
 
 CONSTRAINT_SPECS: tuple[ConstraintSpec, ...] = (
