@@ -160,6 +160,14 @@ def _apply_stage(job: DataImportJob, node: str, state: dict) -> None:
         persist_stats = state.get("persist_stats") or {}
         job.stats = {**(job.stats or {}), "persist": persist_stats}
 
+    if node == "portrait":
+        # 2026-09-27：画像成功/失败计数落库。原先 portrait 失败静默返回默认值，
+        # stats 只显示 persist.failed=0 → "#853 的 82 行里 73 行画像是默认值"却
+        # 看起来完全成功（§20.1）。现在导入详情能直接看到 portrait.failed。
+        portrait_stats = state.get("portrait_stats") or {}
+        if portrait_stats:
+            job.stats = {**(job.stats or {}), "portrait": portrait_stats}
+
 
 def _summarize_rejections(rejected_rows: list[dict], quality_results: list[dict]) -> list[str]:
     """D 级行 → 可读原因列表（条数与单条长度都有上限）。

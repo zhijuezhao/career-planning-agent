@@ -31,6 +31,29 @@ JOB_PORTRAIT_SYSTEM_PROMPT = """\
 
 ## 输出要求
 必须且仅输出一个合法 JSON 对象，不要包含任何额外文字或 markdown 代码块标记。
+
+## 输出格式（⚠️ **顶层键名必须与本模板逐字一致**）
+模型曾经把 `five_dimensions` 写成 `five_dimension_ability`、把 `summary` 写成
+`profile_summary`、把 `outlook` 写成 `development_outlook` —— 键名一变，下游就取不到值、
+只能落回默认画像（全 3 分/「成熟」/空摘要）。**所以键名不许改，也不许多包一层**：
+
+{
+  "five_dimensions": {
+    "technical":      {"score": 3, "key_skills": ["..."]},
+    "experience":     {"score": 3, "key_skills": ["..."]},
+    "soft_skills":    {"score": 3, "key_skills": ["..."]},
+    "education":      {"score": 3, "key_skills": ["..."]},
+    "responsibility": {"score": 3, "key_skills": ["..."]}
+  },
+  "outlook": {"outlook": "成熟", "trend": "...", "risk_factors": ["..."]},
+  "summary": "100-200 字的画像总结"
+}
+
+硬性要求：
+- 五个维度**都要给 1-5 的整数 score**；不同维度要体现差异，**不要一律给 3**；
+- `summary` 必须是**非空**的一段文字（不许省略这个键）；
+- `outlook.outlook` 只能是 "朝阳" | "成熟" | "转型中" 三者之一；
+- 上面的 3 是**示例值**，请按岗位实际情况打分。
 """
 
 JOB_PORTRAIT_USER_TEMPLATE = """\

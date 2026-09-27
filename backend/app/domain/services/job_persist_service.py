@@ -17,6 +17,15 @@ B2-5：upsert 岗位画像时同时写 `job_company_links`（岗位 ↔ 公司 �
    含公司数据首次出现时，**收养**（adopt）此前"公司未知"的同名画像而不是新建一条，
    否则用户"先导职业路线表、再导含公司表"会把同一个岗位裂成两条；
 3. `title_key` 是**生成列**，永远不要手写：DDL 见 `apply_ddl.py`，规则见 `core/dedup_keys.py`。
+
+**岗位信息 vs 岗位画像（2026-09-27 用户明确要求分开）**：这两类数据此前混在同一个 upsert
+里 —— portrait 的 `career_paths` / `transition_roles` 被直接写进 `career_path` /
+`transition_paths`（那是**岗位信息**，用户还要二次开发）。现在：
+
+- **岗位信息**（`field_groups.JOB_INFO_FIELDS`）：来自表格或对源文本的**确定性解析**
+  （`career_fields.py`），本模块**只填空、不覆盖**；模型派生流程不许碰。
+- **岗位画像**（`field_groups.PORTRAIT_FIELDS`）：只能经 `apply_job_portrait()` 写，
+  该函数按白名单行事 —— 重跑画像因此**不可能**改到用户自己的岗位信息。
 """
 
 from __future__ import annotations
@@ -27,6 +36,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dedup_keys import normalise_title
+from app.core.job_agent.career_fields import extract_career_fields
+from app.core.job_agent.field_groups import portrait_payload
 from app.domain.models.job import JobProfile, JobRawData
 from app.domain.services.company_service import (
     link_job_company,
@@ -41,6 +52,22 @@ def _pick(data: dict, key: str, current):
     """取新值；空值视为「本次没提供」，保留原值（避免导入缺列把已有画像抹平）。"""
     value = data.get(key)
     return current if value in _EMPTY else value
+
+
+def apply_job_portrait(profile: JobProfile, data: dict) -> dict:
+    """**画像写入器**：把画像字段写到 ``profile`` 上，并返回实际写入的键值。
+
+    ⚠️ **白名单**：只碰 ``field_groups.PORTRAIT_FIELDS``（`requirement_intensity` /
+    `outlook` / `summary`）。**绝不触碰岗位信息列** —— 用户 2026-09-27 明确要求
+    「岗位信息」与「岗位画像」分开，前者他还要做二次开发。
+
+    画像工具（`portrait_builder`）与重跑脚本都必须经这里写库，别直接 `setattr`。
+    空值不写（"本次没提供"不等于"要清空"）。
+    """
+    payload = portrait_payload(data)
+    for column, value in payload.items():
+        setattr(profile, column, value)
+    return payload
 
 
 async def write_raw_job(session: AsyncSession, data: dict) -> JobRawData:
@@ -121,10 +148,12 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
         session, title_key, company.id if company is not None else None
     )
 
-    five_dim = data.get("five_dimensions") or {}
-    outlook = data.get("outlook") or {}
-    career_paths = data.get("career_paths") or []
-    transition_roles = data.get("transition_roles") or []
+    # ── 岗位信息 vs 岗位画像（用户 2026-09-27 要求：必须分开）───────────────────
+    # `career_path` / `transition_paths` / `certificates` 是**岗位信息**，一律由源文本
+    # **确定性解析**得到（`career_fields.py`）。不再取自 portrait 的 `career_paths` /
+    # `transition_roles` —— 那会让"重跑画像"覆盖用户自己的岗位信息，而 portrait 本身
+    # 还会静默失败返回默认值（§20.1）。
+    career_facts = extract_career_fields(data.get("description"), data.get("requirements"))
 
     if existing is not None:
         existing.industry = _pick(data, "industry", existing.industry)
@@ -138,11 +167,12 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
         existing.experience_requirement = _pick(
             data, "experience_requirement", existing.experience_requirement
         )
-        existing.career_path = _pick(data, "career_paths", existing.career_path)
-        existing.transition_paths = _pick(data, "transition_roles", existing.transition_paths)
-        existing.requirement_intensity = _pick(data, "five_dimensions", existing.requirement_intensity)
-        existing.outlook = _pick(data, "outlook", existing.outlook)
-        existing.summary = _pick(data, "summary", existing.summary)
+        # 岗位信息里的三列：**只填空**（已有值 = 用户的既有数据/已回填结果，不覆盖）
+        for column, items in career_facts.items():
+            if getattr(existing, column) in _EMPTY:
+                setattr(existing, column, items)
+        # 画像字段交给独立写入器（白名单，只碰 PORTRAIT_FIELDS）
+        apply_job_portrait(existing, data)
         if company is not None and (adopt_company or existing.company_id is None):
             # 收养"公司未知"的同名画像：把公司落定，让键从 (title, NULL) 变成 (title, 公司)。
             # 只在精确键不存在时才走到这里，故不会撞唯一索引（并发竞态由调用方重试兜底）。
@@ -158,13 +188,13 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
             salary_range=data.get("salary"),
             education_requirement=data.get("education_requirement"),
             experience_requirement=data.get("experience_requirement"),
-            career_path=career_paths or None,
-            transition_paths=transition_roles or None,
-            requirement_intensity=five_dim or None,
-            outlook=outlook or None,
-            summary=data.get("summary"),
+            career_path=career_facts.get("career_path") or None,
+            transition_paths=career_facts.get("transition_paths") or None,
+            certificates=career_facts.get("certificates") or None,
             company_id=company.id if company is not None else None,
         )
+        # 画像字段仍走同一个白名单写入器，保证"新建"和"更新"两条路的口径一致
+        apply_job_portrait(profile, data)
         session.add(profile)
         created = True
 
@@ -262,4 +292,4 @@ async def persist_import_rows(
     return stats
 
 
-__all__ = ["persist_import_rows", "upsert_job_profile", "write_raw_job"]
+__all__ = ["apply_job_portrait", "persist_import_rows", "upsert_job_profile", "write_raw_job"]

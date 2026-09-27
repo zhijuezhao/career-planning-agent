@@ -40,6 +40,9 @@ class JobImportState(TypedDict, total=False):
 
     # Stage 6: Portrait
     portrait_rows: list[dict]
+    #: 画像成功/失败计数（2026-09-27 新增）。原先 portrait 失败会静默返回默认值，
+    #: `stats` 里只写 `persist.failed: 0` → 82 行里 73 行是默认值却"显示成功"（§20.1）。
+    portrait_stats: dict
 
     # Stage 7: Persist（B2-2）
     persist_stats: dict
@@ -168,14 +171,35 @@ async def node_portrait(state: JobImportState) -> dict:
     from app.core.job_agent.tools.portrait_builder import portrait_builder
 
     portraits: list[dict] = []
+    failed = 0
+    errors: list[str] = []
     for row in state["passed_rows"]:
         job_data_str = json.dumps(row, ensure_ascii=False)
         portrait_result = await portrait_builder.ainvoke({"job_data": job_data_str})
         portraits.append(portrait_result)
+        # 2026-09-27：portrait 失败**必须可见**（`portrait_builder` 会返回 portrait_ok=False
+        # 并**仍然**给一份默认结构，好让流水线继续）—— 否则又会出现"导入显示 100% 成功、
+        # 画像其实全是默认值"（#853 的 82 行里 73 行如此，见 §20.1）。
+        if not portrait_result.get("portrait_ok", True):
+            failed += 1
+            if len(errors) < 5:
+                title = row.get("title") or "未知岗位"
+                errors.append(f"{title}：{portrait_result.get('portrait_error')}"[:200])
+            logger.warning(
+                "Import: 画像生成失败（将落默认值）| title={!r} | error={}",
+                row.get("title"),
+                portrait_result.get("portrait_error"),
+            )
 
-    logger.info("Import: portraits generated | rows={}", len(portraits))
+    logger.info("Import: portraits generated | rows={} | failed={}", len(portraits), failed)
     return {
         "portrait_rows": portraits,
+        "portrait_stats": {
+            "total": len(portraits),
+            "ok": len(portraits) - failed,
+            "failed": failed,
+            "errors": errors,
+        },
         "total_exported": len(portraits),
         "status": "completed",
     }
