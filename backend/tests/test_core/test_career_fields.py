@@ -148,6 +148,8 @@ class TestBackfilledData:
         profiles, raws = self._load()
         if not profiles:
             pytest.skip("库里没有岗位数据")
+        if not raws:
+            pytest.skip("库里没有原始数据（job_raw_data 为空）→ 无对账基准")
 
         by_title: dict[str, list[tuple[str | None, str | None]]] = {}
         for raw in raws:
@@ -185,7 +187,12 @@ class TestBackfilledData:
             else:
                 other_shaped.append(profile.title)  # 历史 object 形状，同样保留
 
-        assert checked >= 1
+        if checked == 0:
+            # 与 `test_all_profiles_have_career_path_and_certificates` 同一套口径：
+            # 库里只剩"测试自己 upsert 的岗位"（没有可追溯的导入行）时无从对账 → 跳过，
+            # 而不是拿 `assert checked >= 1` 报红（2026-09-27：清库后暴露的测试卫生问题）。
+            pytest.skip("库里没有可追溯的导入岗位（与 job_raw_data 对不上）")
+
         assert matched >= 1, "没有任何一条 transition_paths 与源文本一致，回填可能没生效"
         # 被保留的旧值只能是少数（本次回填覆盖了绝大多数）
         assert len(preserved) + len(other_shaped) < checked

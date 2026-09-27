@@ -1,3 +1,10 @@
+"""管理端岗位接口（P1-3 / B2-5 / 任务 4）。
+
+**筛选与聚合逻辑不在本文件**：统一走 `domain/services/job_query_service`，
+与 chat 的 `job_search` 工具共用同一套语义（P4/C2 起）—— 否则"筛得到却看不到"
+那类漂移会从三份拷贝变成四份。本层只负责 HTTP 形状（分页、响应模型、错误码）。
+"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -14,6 +21,12 @@ from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.models.user import User
 from app.domain.models.vector import JobMatchEmbedding
 from app.domain.services.company_service import aggregate_geo_options, refresh_job_count
+from app.domain.services.job_query_service import (
+    company_counts,
+    company_names,
+    job_company_rows,
+    search_jobs,
+)
 from app.infrastructure.database import get_db
 from app.schemas.admin import (
     GeoOptionsResponse,
@@ -26,49 +39,6 @@ from app.schemas.admin import (
 )
 
 router = APIRouter()
-
-
-async def _company_names(db: AsyncSession, jobs: list[JobProfile]) -> dict[int, str]:
-    """给当前页岗位补「在招公司」的**展示名**（一次查询，不做 N+1）。
-
-    岗位↔公司是**多对多**（2026-09-27 任务 2）→ 一个岗位可能有多家在招。列表里只展示
-    **最早建立关联的那一家**作为展示名，完整清单走 `GET /admin/jobs/{id}` 的 `companies`。
-    """
-    ids = [job.id for job in jobs]
-    if not ids:
-        return {}
-    rows = (
-        await db.execute(
-            select(JobCompanyLink.job_profile_id, Company.name)
-            .join(Company, Company.id == JobCompanyLink.company_id)
-            .where(JobCompanyLink.job_profile_id.in_(ids))
-            .order_by(JobCompanyLink.job_profile_id.asc(), JobCompanyLink.id.asc())
-        )
-    ).all()
-    names: dict[int, str] = {}
-    for job_profile_id, name in rows:
-        names.setdefault(job_profile_id, name)  # 第一条（最早）即展示名
-    return names
-
-
-async def _company_counts(db: AsyncSession, jobs: list[JobProfile]) -> dict[int, int]:
-    """给当前页岗位批量补「有多少家公司在招」（B2-5，一次查询，无 N+1）。
-
-    多对多模型下**直接数关联表**即可。P2 那套"按 `title_key` 汇总同名画像"的绕法
-    （同名不同公司 = 多条画像）在 2026-09-27 任务 2 已废止 —— 现在同名只有一条岗位。
-    """
-    ids = [job.id for job in jobs]
-    if not ids:
-        return {}
-    rows = await db.execute(
-        select(
-            JobCompanyLink.job_profile_id,
-            func.count(func.distinct(JobCompanyLink.company_id)),
-        )
-        .where(JobCompanyLink.job_profile_id.in_(ids))
-        .group_by(JobCompanyLink.job_profile_id)
-    )
-    return {row[0]: row[1] for row in rows.all()}
 
 
 def _job_response(
@@ -96,50 +66,19 @@ async def list_jobs(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List job profiles with optional filtering."""
-    query = select(JobProfile)
-    count_query = select(func.count()).select_from(JobProfile)
-
-    if industry:
-        query = query.where(JobProfile.industry == industry)
-        count_query = count_query.where(JobProfile.industry == industry)
-    if level:
-        query = query.where(JobProfile.level == level)
-        count_query = count_query.where(JobProfile.level == level)
-    if company_id is not None:
-        # 走关联表：即便该岗位的"主公司"是别家，只要这家也在招就应命中
-        linked = select(JobCompanyLink.job_profile_id).where(
-            JobCompanyLink.company_id == company_id
-        )
-        query = query.where(JobProfile.id.in_(linked))
-        count_query = count_query.where(JobProfile.id.in_(linked))
-    # 地域筛选（任务 4）：口径与岗位详情的「在招公司」**逐字一致** ——
-    # 关联行自带的地域优先（"这次招聘在哪儿"），缺失才回落到公司所在地。
-    # 用 coalesce 而不是"只认关联行"：否则老数据（关联行没写地域、公司写了）会筛不到。
-    if region:
-        linked = (
-            select(JobCompanyLink.job_profile_id)
-            .join(Company, Company.id == JobCompanyLink.company_id)
-            .where(func.coalesce(JobCompanyLink.region, Company.region) == region)
-        )
-        query = query.where(JobProfile.id.in_(linked))
-        count_query = count_query.where(JobProfile.id.in_(linked))
-    if city:
-        linked = (
-            select(JobCompanyLink.job_profile_id)
-            .join(Company, Company.id == JobCompanyLink.company_id)
-            .where(func.coalesce(JobCompanyLink.city, Company.city) == city)
-        )
-        query = query.where(JobProfile.id.in_(linked))
-        count_query = count_query.where(JobProfile.id.in_(linked))
-
-    total = (await db.execute(count_query)).scalar() or 0
-
-    query = query.order_by(JobProfile.id.desc()).offset(skip).limit(limit)
-    result = await db.execute(query)
-    jobs = list(result.scalars().all())
-    names = await _company_names(db, jobs)
-    counts = await _company_counts(db, jobs)
+    """岗位列表：筛选语义全部在 `job_query_service`（与 chat 的 `job_search` 同一套）。"""
+    jobs, total = await search_jobs(
+        db,
+        industry=industry,
+        level=level,
+        company_id=company_id,
+        region=region,
+        city=city,
+        limit=limit,
+        offset=skip,
+    )
+    names = await company_names(db, jobs)
+    counts = await company_counts(db, jobs)
 
     return JobProfileListResponse(
         total=total,
@@ -188,14 +127,7 @@ async def get_job(
     if job is None:
         raise HTTPException(status_code=404, detail="Job profile not found")
 
-    rows = (
-        await db.execute(
-            select(JobCompanyLink, Company)
-            .join(Company, Company.id == JobCompanyLink.company_id)
-            .where(JobCompanyLink.job_profile_id == job.id)
-            .order_by(JobCompanyLink.id.asc())
-        )
-    ).all()
+    rows = await job_company_rows(db, job.id)
 
     detail = JobProfileDetail.model_validate(job)
     # 多对多没有"主公司"概念了：展示名取**最早建立关联**的那家，完整清单在 companies 里

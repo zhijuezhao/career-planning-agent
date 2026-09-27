@@ -57,21 +57,26 @@ def _inject_runtime_args(
 ) -> dict[str, Any]:
     """把「模型不可能知道」的运行时依赖注入工具入参。
 
-    - `db`：需要外部 session 的工具（当前 4 个工具都自建 session，属预留位）；
+    - `db`：需要外部 session 的工具；
     - `user_id`：当前登录用户；
     - `profile_id`：能力画像 id，与 `user_id` 是 **1:1 约定**
       （`snapshot_service` 里就写着 `profile_id=user_id`，`report_service` 亦同）。
-      不注入的话 `generate_career_report(user_id, profile_id, ...)` 这种工具
-      模型根本无从填参 —— 看着能用、一调就错。
+
+    🔒 **这三个是"运行时身份"，一律以服务端值为准、强制覆盖模型给的值**（2026-09-27 P4 收紧）。
+    早先的写法是"模型没给才注入"（`"user_id" not in args`），那等于把身份参数交给模型：
+    P4 新增的 `user_snapshot` 会读**个人画像** —— 只要模型（或被提示注入诱导）填一个
+    `user_id=1`，学生就能读到**别人的**画像。这类参数从来不是模型该决定的。
+    强制覆盖对既有工具也是纯收益：`generate_career_report(user_id, profile_id, …)`
+    本来就只应作用于当前登录用户。
     """
     args = dict(raw_args)
     fields = _tool_field_names(tool)
     if db is not None and "db" in fields:
         args["db"] = db
     if user_id is not None:
-        if "user_id" in fields and "user_id" not in args:
+        if "user_id" in fields:
             args["user_id"] = user_id
-        if "profile_id" in fields and "profile_id" not in args:
+        if "profile_id" in fields:
             args["profile_id"] = user_id
     return args
 
