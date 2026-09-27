@@ -20,6 +20,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dedup_keys import normalise_title
+from app.core.dimensions.rubrics import DIMENSION_ORDER
 from app.domain.models.company import Company
 from app.domain.models.job import JobProfile
 from app.domain.models.job_company_link import JobCompanyLink
@@ -224,6 +225,52 @@ async def job_company_summaries(
     return grouped
 
 
+# ── 岗位侧六维（画像 → 匹配用的 {维度: 分数}）────────────────────────────────────
+# 2026-09-27 P5：岗位侧的维度**唯一真相是画像**（`job_profiles.requirement_intensity`）。
+# 此前匹配读的是 `dimension_scores` 表里 `profile_type='job'` 的行，而**全仓没有任何地方
+# 写那种行**（唯一的写入者写的是 `candidate`）→ 岗位侧恒为 `{}`，六维对比实际全是 0。
+
+
+def extract_job_dimensions(portrait: object) -> dict[str, float]:
+    """从岗位画像里取出**六维分数** `{维度: 分数}`（形状容错）。
+
+    - 只认**六维规范名**（`DIMENSION_ORDER`）。**刻意不做**「英文五维(technical/…) → 中文六维」
+      的映射：两套维度的含义并不一一对应（职业匹配度/成长潜力在旧五维里没有对应项），
+      硬映射就是**编数据**（用户 2026-09-27 明确否掉了那个方案）；
+    - 形状容错（真实数据的 JSONB 形状不止一种，§18 的教训）：
+      `{维度: {"score": 4, "key_skills": [...]}}` / `{维度: 4}` / `{维度: "4"}`；
+    - **缺的维度不补 0**：不返回 = 没有可比数据，让调用方如实说"不可比"，
+      而不是拿 0 去参与 `min(学生/岗位)` 算出"完全不匹配"这种假结论。
+    """
+    if not isinstance(portrait, dict):
+        return {}
+    out: dict[str, float] = {}
+    for dim in DIMENSION_ORDER:
+        value = portrait.get(dim)
+        score: Any = value
+        if isinstance(value, dict):
+            score = value.get("score")
+        if score is None:
+            continue
+        try:
+            out[dim] = float(score)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def job_dimension_scores(
+    session: AsyncSession, job_profile_id: int
+) -> dict[str, float]:
+    """按岗位 id 取六维（读**画像**，不再读 `dimension_scores` 的 job 行）。"""
+    portrait = (
+        await session.execute(
+            select(JobProfile.requirement_intensity).where(JobProfile.id == job_profile_id)
+        )
+    ).scalar_one_or_none()
+    return extract_job_dimensions(portrait)
+
+
 __all__ = [
     "DEFAULT_COMPANY_LIMIT",
     "DEFAULT_LIMIT",
@@ -232,7 +279,9 @@ __all__ = [
     "clamp_limit",
     "company_counts",
     "company_names",
+    "extract_job_dimensions",
     "job_company_rows",
     "job_company_summaries",
+    "job_dimension_scores",
     "search_jobs",
 ]

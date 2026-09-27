@@ -10,6 +10,7 @@ from app.domain.models.dimension_weight import DimensionWeight
 from app.domain.models.job import JobProfile
 from app.domain.models.profile_snapshot import ProfileSnapshot
 from app.domain.models.vector import JobMatchEmbedding
+from app.domain.services.job_query_service import job_dimension_scores
 from app.infrastructure.database import async_session_factory
 
 
@@ -203,6 +204,13 @@ async def get_dimension_scores(
     """Get dimension scores for a profile.
 
     Returns dict of {top_dimension: score}.
+
+    ⚠️ **岗位侧已不再用它**（2026-09-27 P5 起）：岗位的六维读**画像**
+    （`job_query_service.job_dimension_scores` ← `job_profiles.requirement_intensity`）。
+    原因：`dimension_scores` 里 `profile_type='job'` 的行**全仓没有任何写入者**
+    （唯一真实调用点写的是 `candidate`），所以这里对 job 永远返回 `{}` ——
+    而 `compute_match_score` 会把"取不到分"当成"无要求=满匹配"，等于六维对比完全没参与。
+    本函数保留给 `candidate`（以及历史读取），别再拿它读岗位。
     """
     own_session = session is None
     if own_session:
@@ -384,8 +392,12 @@ async def _match_snapshot_detailed(
         distance = hit["distance"]
 
         try:
-            # Job dimension scores (job side still reads DimensionScore job rows)
-            job_dims = await get_dimension_scores("job", job_profile_id, session=session)
+            # 岗位侧六维：**读画像**（2026-09-27 P5 起）——`requirement_intensity` 里的
+            # 中文六维，与学生侧同名（`core/dimensions/rubrics.py`）。
+            # 此前读的是 `dimension_scores` 表 `profile_type='job'` 的行，而**全仓没人写那种行**
+            # → 岗位侧恒为 `{}` → `compute_match_score` 里 `job_score=0` 被当"无要求=满匹配"，
+            # 六维对比实际完全没参与。缺画像时仍是 `{}`（行为与切换前一致，不会更差）。
+            job_dims = await job_dimension_scores(session, job_profile_id)
 
             # Per-hit job-industry weights (R-5.1)
             job_result = await session.execute(
