@@ -114,3 +114,20 @@ async def create_profile_snapshot(user_id: int, db: AsyncSession) -> ProfileSnap
     await db.commit()
     await db.refresh(snap)
     return snap
+
+
+async def get_latest_snapshot(db: AsyncSession, user_id: int) -> ProfileSnapshot | None:
+    """该用户**最近一次**能力快照（没有则 None）。
+
+    同秒创建时用 `id` 兜底排序，保证"最新"是确定的。
+    抽成一处是因为 P4 的 `user_snapshot` 工具与 P5 的 `gap_analysis` 都要它 ——
+    重复实现迟早会在"按什么排序算最新"上分叉。
+    """
+    return (
+        await db.execute(
+            select(ProfileSnapshot)
+            .where(ProfileSnapshot.user_id == user_id)
+            .order_by(ProfileSnapshot.created_at.desc(), ProfileSnapshot.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()

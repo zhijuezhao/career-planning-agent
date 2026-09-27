@@ -226,6 +226,11 @@ async def api_send_message(
                 llm_with_tools = gateway.get_model().bind_tools(tools)
                 agent = compile_agent(llm_with_tools, tools)
 
+                # 工具（agent 路径）产出的图收集到这里：工具结果本身要回给模型，
+                # 而 viz 只给前端（见 nodes._split_tool_viz）。P5 起与 L1 工作流**同一套**
+                # 下发与落库路径（都是 assistant_viz → SSE + chat_messages.viz）。
+                viz_sink: list[dict[str, Any]] = []
+
                 config: dict[str, Any] = {
                     "configurable": {
                         "llm": llm_with_tools,
@@ -233,6 +238,7 @@ async def api_send_message(
                         # 工具需要的运行时身份（模型不可能自己知道）
                         "user_id": current_user.id,
                         "db": db,
+                        "viz_sink": viz_sink,
                     },
                     # 步数上限：防 ReAct 反复调工具烧 token
                     "recursion_limit": settings_obj.chat_agent_recursion_limit,
@@ -275,6 +281,17 @@ async def api_send_message(
                             session_id,
                         )
                         yield _sse({"type": "tool", "phase": phase, "name": tool_name})
+
+                # 工具产出的图（P5）：跑完 agent 再下发 —— 与 L1 分支同一套载荷与落库口径
+                assistant_viz = normalise_viz(viz_sink) or None
+                if assistant_viz:
+                    logger.info(
+                        "Agent 工具产出 viz | session_id={} | items={}",
+                        session_id,
+                        len(assistant_viz),
+                    )
+                    for item in assistant_viz:
+                        yield _sse({"type": "viz", **item})
 
             # ── ③ 输出侧合规：统一追加免责声明（幂等）──────────────────────────
             output_safety = check_content(assistant_content)

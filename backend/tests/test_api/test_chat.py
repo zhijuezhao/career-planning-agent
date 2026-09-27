@@ -374,11 +374,15 @@ class TestChatAPI:
         assistant_msgs = [m for m in detail["messages"] if m["role"] == "assistant"]
         assert assistant_msgs and "抱歉" in assistant_msgs[-1]["content"]
 
-    def test_send_message_l1_workflow_skips_agent_and_emits_viz(self, auth_setup):
+    def test_send_message_l1_workflow_skips_agent_and_emits_viz(self, auth_setup, ensure_some_jobs):
         """C1：L1 命中的问题 **0 token** —— 不进 agent、不取模型，并下发 viz。
 
         这是"能走工作流就不用 agent"（§11 用户原话）的第一条可执行验收：
         用 mock 盯着 `compile_agent` 与 `gateway.get_model`，两者都**不许被调用**。
+
+        ⚠️ 需要库**非空**：空库时 L1 `job_catalog` 会**故意不发图**（不编数据）。
+        全量跑时这条靠 `test_admin_jobs` 泄漏的岗位"碰巧"通过 —— 单独跑 / 清库后就会红，
+        所以用 `ensure_some_jobs` 显式保证（见该 fixture 的说明）。
         """
         sid = self._new_session(auth_setup, "L1 工作流会话")
 
@@ -541,3 +545,57 @@ class TestChatAPI:
         ).json()
         saved = [m for m in detail["messages"] if m["role"] == "assistant"][-1]["content"]
         assert saved == streamed  # 用户看到的 = 库里存的
+
+    def test_tool_viz_reaches_stream_and_db(self, auth_setup):
+        """P5：**工具**产出的图（雷达）也要走 SSE 下发 + 落库，与 L1 工作流同一套。
+
+        工具怎么把图交给管道：写进 `config["configurable"]["viz_sink"]`
+        （工具结果本身回给模型，`viz` 被 `nodes._split_tool_viz` 摘出来只给前端）。
+        这里用一个假 agent 直接写 sink —— 覆盖的是 **chat.py 的收集/下发/落库**这一段。
+        """
+        sid = self._new_session(auth_setup, "工具产图会话")
+        radar = {
+            "kind": "radar",
+            "title": "六维对比：我 vs Java 工程师",
+            "option": {"series": [{"type": "radar", "data": []}]},
+        }
+
+        async def mock_astream_events(*args, **kwargs):
+            # 模拟 execute_tools 往 sink 里塞图（真实路径见 nodes.execute_tools）
+            config = kwargs.get("config") or {}
+            sink = (config.get("configurable") or {}).get("viz_sink")
+            assert isinstance(sink, list), "chat.py 必须把 viz_sink 传进 configurable"
+            sink.append(dict(radar))
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": {"content": "看下面这张雷达图。"}},
+            }
+
+        mock_agent = MagicMock()
+        mock_agent.astream_events = mock_astream_events
+        mock_gateway = MagicMock()
+        mock_gateway.current_model = "deepseek"
+
+        with patch("app.api.v1.chat.get_llm_gateway", return_value=mock_gateway), patch(
+            "app.api.v1.chat.compile_agent", return_value=mock_agent
+        ):
+            resp = client.post(
+                f"/api/v1/chat/sessions/{sid}/messages",
+                json={"content": "我和 Java 工程师差在哪"},
+                headers={"Authorization": f"Bearer {auth_setup['token']}"},
+            )
+
+        events = self._events(resp)
+        viz_events = [e for e in events if e["type"] == "viz"]
+        assert len(viz_events) == 1, f"工具产出的图没下发：{events}"
+        assert viz_events[0]["kind"] == "radar"
+        assert viz_events[0]["title"] == radar["title"]
+
+        # 落库：刷新后图还在（这是 C1 立下的目标之一）
+        detail = client.get(
+            f"/api/v1/chat/sessions/{sid}",
+            headers={"Authorization": f"Bearer {auth_setup['token']}"},
+        ).json()
+        saved_viz = [m for m in detail["messages"] if m["role"] == "assistant"][-1]["viz"]
+        assert isinstance(saved_viz, list) and saved_viz
+        assert saved_viz[0]["kind"] == "radar"

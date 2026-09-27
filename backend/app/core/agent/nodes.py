@@ -16,7 +16,8 @@ from loguru import logger
 #
 # chat 调用点传的 config：
 #   {"configurable": {"llm": <已 bind_tools 的模型>, "tools_by_name": {...},
-#                     "db": <AsyncSession>, "user_id": <int>},
+#                     "db": <AsyncSession>, "user_id": <int>,
+#                     "viz_sink": <list>},   # 工具产出的图收集到这里（见 _split_tool_viz）
 #    "recursion_limit": <步数上限>}
 
 
@@ -102,18 +103,39 @@ async def call_model(state: AgentState, config: RunnableConfig | None = None) ->
     return {"messages": [response], "next": "tools" if response.tool_calls else "end"}
 
 
+def _split_tool_viz(result: Any) -> tuple[Any, list[dict[str, Any]]]:
+    """把工具结果里的 `viz` 载荷**摘出来**，返回 `(给模型看的结果, viz 列表)`。
+
+    P5（2026-09-27）新增：让**工具**也能产图（此前只有 L1 工作流能产 viz）。
+
+    ⚠️ **必须摘掉再给模型**：`viz` 里是 ECharts option（几十上百个数字与中文键），
+    塞进 `ToolMessage` 就是**纯烧 token** —— 模型对"怎么画图"毫无用处，
+    图由前端渲染。所以工具返回 `{"...业务数据...": ..., "viz": [...]}`，
+    业务数据回给模型，`viz` 只进 `viz_sink`（供 SSE 下发 + 落库）。
+    """
+    if not isinstance(result, dict) or "viz" not in result:
+        return result, []
+
+    payload = {key: value for key, value in result.items() if key != "viz"}
+    raw = result.get("viz")
+    items = raw if isinstance(raw, list) else [raw]
+    return payload, [item for item in items if isinstance(item, dict)]
+
+
 async def execute_tools(
     state: AgentState, config: RunnableConfig | None = None
 ) -> dict[str, list[ToolMessage]]:
     """Execute tool calls from the last AI message.
 
     Expects ``config["configurable"]["tools_by_name"]`` to be a dict mapping
-    tool names to ``BaseTool`` instances（可选 ``db`` / ``user_id`` 用于参数注入）。
+    tool names to ``BaseTool`` instances（可选 ``db`` / ``user_id`` 用于参数注入，
+    ``viz_sink`` 用于收集工具产出的图）。
     """
     configurable = (config or {}).get("configurable", {}) or {}
     tools_by_name: dict[str, BaseTool] = configurable.get("tools_by_name", {}) or {}
     db = configurable.get("db")
     user_id = configurable.get("user_id")
+    viz_sink = configurable.get("viz_sink")
 
     last_message = state["messages"][-1]
 
@@ -129,7 +151,13 @@ async def execute_tools(
                     tool, tool_call["args"], db=db, user_id=user_id
                 )
                 result = await tool.ainvoke(args)
-                content = str(result)
+                payload, viz = _split_tool_viz(result)
+                if viz and isinstance(viz_sink, list):
+                    viz_sink.extend(viz)
+                    logger.info(
+                        "Tool produced viz | name={} | items={}", tool_call["name"], len(viz)
+                    )
+                content = str(payload)
                 logger.info("Tool executed | name={} | args={}", tool_call["name"], args)
             except Exception as exc:  # noqa: BLE001 - 工具异常要回给模型，不能中断整轮
                 content = f"Error executing '{tool_call['name']}': {exc}"

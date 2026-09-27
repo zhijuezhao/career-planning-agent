@@ -3,6 +3,7 @@ from langchain_core.tools import BaseTool
 from app.config import get_settings
 from app.core.agent.tools.jobs import job_detail, job_search
 from app.core.agent.tools.knowledge import career_knowledge_search
+from app.core.agent.tools.matching import gap_analysis, job_compare
 from app.core.agent.tools.report_tool import generate_career_report
 from app.core.agent.tools.safety import content_safety_check
 from app.core.agent.tools.search import web_search
@@ -12,8 +13,10 @@ __all__ = [
     "AGENT_TOOLS",
     "career_knowledge_search",
     "content_safety_check",
+    "gap_analysis",
     "generate_career_report",
     "get_agent_tools",
+    "job_compare",
     "job_detail",
     "job_search",
     "user_snapshot",
@@ -26,6 +29,9 @@ AGENT_TOOLS: list[BaseTool] = [
     job_search,
     job_detail,
     user_snapshot,
+    # C3（P5）：六维对比 —— 会产 radar viz（工具产图链路见 nodes._split_tool_viz）
+    gap_analysis,
+    job_compare,
     career_knowledge_search,
     content_safety_check,
     web_search,
