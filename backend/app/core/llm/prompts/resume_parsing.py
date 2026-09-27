@@ -1,3 +1,5 @@
+from app.core.dimensions.rubrics import render_rubric
+
 RESUME_PARSING_SYSTEM_PROMPT = """\
 你是一个专业的简历解析助手。你的任务是从简历文本中提取结构化信息，并对求职者进行维度评分。
 
@@ -8,23 +10,12 @@ RESUME_PARSING_SYSTEM_PROMPT = """\
 - 技能熟练度打分范围 0-100（用于 soft_skills.scored 和 hard_skills.scored）
 - 维度评分使用 1-5 分制（用于 dimension_scoring），见下方评分锚点
 
-## 维度评分要求（1-5分制）
-根据简历内容对求职者进行6个顶层维度评分，每个维度包含子维度。
+## 维度评分要求（1-5 分制）
+根据简历内容对求职者进行 6 个顶层维度评分，每个维度包含子维度。
 
-评分锚点：
-- 1分：不满足/基础薄弱
-- 3分：达到常规合格水平
-- 5分：远超预期要求
+{rubric}
 
-6个顶层维度及其子维度：
-1. 专业技术能力：核心专业技能、工具与技术栈
-2. 实践经验背景：相关经历匹配度、实践深度与产出
-3. 通用软素质：沟通协作能力、问题解决能力、责任心与执行力
-4. 职业匹配度：方向与行业匹配、地域与薪资匹配
-5. 成长潜力：学习能力、进取心与可塑性
-6. 基础资质条件：学历与专业对口、资质认证
-
-顶层维度得分 = 其子维度的等权平均值。total_dim_score = 6个顶层维度得分的等权平均。
+顶层维度得分 = 其子维度的等权平均值。total_dim_score = 6 个顶层维度得分的等权平均。
 
 ## 输出 Schema
 {
@@ -157,8 +148,15 @@ RESUME_PARSING_USER_TEMPLATE = """\
 """
 
 
+#: 评分标准**不写死在这里**：从 `core/dimensions/rubrics.py` 渲染（改数据即改标准）。
+#: ⚠️ 用 `.replace` 而不是 `.format`：提示词里含 JSON Schema（大量 `{}`），
+#: 用 format 会把它当成占位符直接炸。
+def _rendered_system_prompt() -> str:
+    return RESUME_PARSING_SYSTEM_PROMPT.replace("{rubric}", render_rubric("candidate"))
+
+
 def build_resume_parsing_messages(resume_text: str) -> list[dict[str, str]]:
     return [
-        {"role": "system", "content": RESUME_PARSING_SYSTEM_PROMPT},
+        {"role": "system", "content": _rendered_system_prompt()},
         {"role": "user", "content": RESUME_PARSING_USER_TEMPLATE.format(resume_text=resume_text)},
     ]

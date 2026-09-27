@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.dimensions.rubrics import DIMENSION_ORDER, DIMENSIONS
+
 
 class BasicInfo(BaseModel):
     name: str | None = None
@@ -113,23 +115,12 @@ class ParsedResume(BaseModel):
     dimension_scoring: DimensionScoring | None = None
 
 
-TOP_DIMENSIONS = [
-    "专业技术能力",
-    "实践经验背景",
-    "通用软素质",
-    "职业匹配度",
-    "成长潜力",
-    "基础资质条件",
-]
+# 维度定义**唯一来源**在 `app.core.dimensions.rubrics`（两侧共用一套维度 + 两套评分标准）。
+# 这里只做 re-export，保证 `from app.core.resume_agent.schemas import TOP_DIMENSIONS` 仍然可用，
+# 同时避免"学生侧一份、岗位侧又一份"的漂移（2026-09-27 P5 口径统一）。
+TOP_DIMENSIONS = list(DIMENSION_ORDER)
 
-SUB_DIMENSIONS: dict[str, list[str]] = {
-    "专业技术能力": ["核心专业技能", "工具与技术栈"],
-    "实践经验背景": ["相关经历匹配度", "实践深度与产出"],
-    "通用软素质": ["沟通协作能力", "问题解决能力", "责任心与执行力"],
-    "职业匹配度": ["方向与行业匹配", "地域与薪资匹配"],
-    "成长潜力": ["学习能力", "进取心与可塑性"],
-    "基础资质条件": ["学历与专业对口", "资质认证"],
-}
+SUB_DIMENSIONS: dict[str, list[str]] = {dim: list(subs) for dim, subs in DIMENSIONS.items()}
 
 ALL_SUB_DIM_KEYS = [sub for subs in SUB_DIMENSIONS.values() for sub in subs]
 

@@ -37,14 +37,18 @@ SOURCE_DESCRIPTION = "岗位晋升：全栈工程师 / 技术经理\n换岗方�
 SOURCE_REQUIREMENTS = "核心技能：Java、Redis\n所需证书：软考（软件设计师）、Oracle Java认证（OCP/OCM）"
 
 #: 故意与源文本**不同**的模型产物 —— 如果它出现在岗位信息列里，就是分离被破坏
+#: （2026-09-27 P5 起画像维度块是**六维中文**，与`core/dimensions/rubrics.py` 同名）
 PORTRAIT_PAYLOAD = {
-    "five_dimensions": {
-        "technical": {"score": 5, "key_skills": ["微服务"]},
-        "experience": {"score": 4, "key_skills": []},
-        "soft_skills": {"score": 3, "key_skills": []},
-        "education": {"score": 3, "key_skills": []},
-        "responsibility": {"score": 4, "key_skills": []},
+    "six_dimensions": {
+        "专业技术能力": {"score": 5, "key_skills": ["微服务"]},
+        "实践经验背景": {"score": 4},
+        "通用软素质": {"score": 3},
+        "职业匹配度": {"score": 3},
+        "成长潜力": {"score": 4},
+        "基础资质条件": {"score": 3},
     },
+    # 这两项**不属于画像**（属岗位信息，由 career_fields 确定性解析）——
+    # 故意留在这里，用来验证"模型就算产了也不会进岗位信息列"
     "career_paths": ["模型编的晋升"],
     "transition_roles": ["模型编的换岗"],
     "outlook": {"outlook": "朝阳", "trend": "需求稳定", "risk_factors": []},
@@ -77,12 +81,12 @@ class TestFieldGroups:
     def test_portrait_payload_maps_pipeline_keys_and_drops_facts(self):
         payload = portrait_payload(PORTRAIT_PAYLOAD)
         assert set(payload) == {"requirement_intensity", "outlook", "summary"}
-        assert payload["requirement_intensity"]["technical"]["score"] == 5
+        assert payload["requirement_intensity"]["专业技术能力"]["score"] == 5
         # 模型给的 career_paths / transition_roles 不该出现在画像载荷里被写库
         assert "career_path" not in payload
 
     def test_portrait_payload_skips_empty_values(self):
-        assert portrait_payload({"summary": "", "outlook": {}, "five_dimensions": None}) == {}
+        assert portrait_payload({"summary": "", "outlook": {}, "six_dimensions": None}) == {}
 
     def test_facts_payload_excludes_portrait(self):
         payload = facts_payload({**PORTRAIT_PAYLOAD, "title": "Java", "hard_skills": ["A"]})
@@ -100,7 +104,7 @@ class TestPortraitWriterCannotTouchFacts:
             career_path=["全栈工程师", "技术经理"],
             transition_paths=["测试开发工程师"],
             certificates=["软考（软件设计师）"],
-            requirement_intensity={"technical": {"score": 3, "key_skills": []}},
+            requirement_intensity={"专业技术能力": {"score": 3, "key_skills": []}},
             outlook={"outlook": "成熟", "trend": "", "risk_factors": []},
             summary="",
         )
@@ -112,12 +116,12 @@ class TestPortraitWriterCannotTouchFacts:
         for column, before in facts_before.items():
             assert getattr(profile, column) == before, f"画像写入改到了岗位信息列 {column}"
         # 画像列确实被更新了
-        assert profile.requirement_intensity["technical"]["score"] == 5
+        assert profile.requirement_intensity["专业技术能力"]["score"] == 5
         assert profile.summary == "模型给的摘要"
 
     def test_empty_portrait_does_not_clear_existing_portrait(self):
         profile = JobProfile(title="Java", summary="旧摘要", outlook={"outlook": "成熟"})
-        apply_job_portrait(profile, {"summary": "", "outlook": None, "five_dimensions": None})
+        apply_job_portrait(profile, {"summary": "", "outlook": None, "six_dimensions": None})
         assert profile.summary == "旧摘要"
         assert profile.outlook == {"outlook": "成熟"}
 
@@ -170,7 +174,7 @@ class TestUpsertKeepsFactsFromSourceText:
         assert "模型编的晋升" not in (profile.career_path or [])
         assert "模型编的换岗" not in (profile.transition_paths or [])
         # 画像列照常写入
-        assert profile.requirement_intensity["technical"]["score"] == 5
+        assert profile.requirement_intensity["专业技术能力"]["score"] == 5
         assert profile.summary == "模型给的摘要"
 
     def test_second_upsert_does_not_overwrite_user_facts(self):
@@ -229,7 +233,7 @@ class TestPortraitBuilderObservability:
     """画像失败必须**可见**（原先静默返回默认值，让 73/82 行"假装成功"）。"""
 
     def test_success_marks_portrait_ok(self):
-        fake = SimpleNamespace(content='{"five_dimensions": {"technical": {"score": 4}}, "summary": "s"}')
+        fake = SimpleNamespace(content='{"six_dimensions": {"专业技术能力": {"score": 4}}, "summary": "s"}')
         gateway = MagicMock()
         gateway.ainvoke = AsyncMock(return_value=fake)
         with patch(
@@ -251,4 +255,4 @@ class TestPortraitBuilderObservability:
         assert "LLM unavailable" in (result["portrait_error"] or "")
         assert gateway.ainvoke.await_count == 2  # 重试了一次
         # 仍然返回可继续的默认结构（流水线不该因为一行画像失败而中断）
-        assert result["five_dimensions"]["technical"]["score"] == 3
+        assert result["six_dimensions"]["专业技术能力"]["score"] == 3

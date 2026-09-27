@@ -207,14 +207,14 @@ class TestJobExtractor:
 class TestPortraitBuilder:
     @pytest.mark.asyncio
     async def test_returns_llm_portrait(self):
+        # 2026-09-27 P5 起画像维度块是**六维中文**（与学生侧同名、评分标准分侧）
         fake = (
-            '{"five_dimensions": {"technical": {"score": 4, "key_skills": ["Vue"]}, '
-            '"experience": {"score": 3, "key_skills": []}, '
-            '"soft_skills": {"score": 3, "key_skills": []}, '
-            '"education": {"score": 3, "key_skills": []}, '
-            '"responsibility": {"score": 3, "key_skills": []}}, '
-            '"career_paths": ["初级-中级-高级"], '
-            '"transition_roles": ["产品经理"], '
+            '{"six_dimensions": {"专业技术能力": {"score": 4, "key_skills": ["Vue"]}, '
+            '"实践经验背景": {"score": 3}, '
+            '"通用软素质": {"score": 3}, '
+            '"职业匹配度": {"score": 3}, '
+            '"成长潜力": {"score": 3}, '
+            '"基础资质条件": {"score": 3}}, '
             '"outlook": {"outlook": "朝阳", "trend": "需求稳定", '
             '"risk_factors": []}, '
             '"summary": "前端岗位总结"}'
@@ -224,9 +224,29 @@ class TestPortraitBuilder:
             return_value=_mock_gateway(fake),
         ):
             result = await portrait_builder.ainvoke({"job_data": '{"title": "test"}'})
-        assert result["five_dimensions"]["technical"]["score"] == 4
-        assert result["career_paths"] == ["初级-中级-高级"]
+        assert result["six_dimensions"]["专业技术能力"]["score"] == 4
+        assert result["six_dimensions"]["专业技术能力"]["key_skills"] == ["Vue"]
         assert result["outlook"]["outlook"] == "朝阳"
+        assert result["portrait_ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_five_dimension_keys_still_accepted(self):
+        """老口径（英文五维 + `five_dimensions` 顶层键）仍要能收下 —— 别名表是**第二道防线**。
+
+        历史教训（§21）：模型换键名会让下游取不到值、**静默落回默认画像**，
+        所以宁可多留一层兼容，也不要丢一整条画像。
+        """
+        fake = (
+            '{"five_dimensions": {"technical": {"score": 5, "key_skills": ["Java"]}, '
+            '"experience": {"score": 3}}, "summary": "旧口径画像"}'
+        )
+        with patch(
+            "app.core.job_agent.tools.portrait_builder.get_llm_gateway",
+            return_value=_mock_gateway(fake),
+        ):
+            result = await portrait_builder.ainvoke({"job_data": '{"title": "test"}'})
+        assert result["six_dimensions"]["technical"]["score"] == 5
+        assert result["portrait_ok"] is True
 
     @pytest.mark.asyncio
     async def test_fallback_on_llm_failure(self):
@@ -234,7 +254,7 @@ class TestPortraitBuilder:
         mock_gateway.ainvoke = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
         with patch("app.core.job_agent.tools.portrait_builder.get_llm_gateway", return_value=mock_gateway):
             result = await portrait_builder.ainvoke({"job_data": '{"title": "test"}'})
-        assert result["five_dimensions"]["technical"]["score"] == 3
+        assert result["six_dimensions"]["专业技术能力"]["score"] == 3
         assert result["summary"] == ""
 
     @pytest.mark.asyncio

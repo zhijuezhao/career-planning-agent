@@ -91,12 +91,13 @@ async def _seed_jobs() -> dict[str, int]:
                 "region": "广东",
                 "city": "深圳",
                 "source_url": "https://example.com/p4/1",
-                "five_dimensions": {
-                    "technical": {"score": 5, "key_skills": ["Java"]},
-                    "experience": {"score": 4},
-                    "soft_skills": {"score": 3},
-                    "education": {"score": 3},
-                    "responsibility": {"score": 4},
+                "six_dimensions": {
+                    "专业技术能力": {"score": 5, "key_skills": ["Java"]},
+                    "实践经验背景": {"score": 4},
+                    "通用软素质": {"score": 3},
+                    "职业匹配度": {"score": 3},
+                    "成长潜力": {"score": 4},
+                    "基础资质条件": {"score": 3},
                 },
                 "summary": "后端主力岗",
             },
@@ -299,8 +300,8 @@ class TestJobDetailTool:
         job = result["job"]
         assert job["title"] == _title("Java工程师")
         assert job["industry"] == "互联网" and job["level"] == "高级"
-        # 画像五维被压成 {维度: 分数}（不是原 JSONB）
-        assert job["portrait_dimensions"]["technical"] == 5.0
+        # 画像六维被压成 {维度: 分数}（不是原 JSONB）
+        assert job["portrait_dimensions"]["专业技术能力"] == 5.0
         assert job["company_count"] == 1
         link = job["companies"][0]
         assert link["region"] == "广东" and link["source_url"] == "https://example.com/p4/1"

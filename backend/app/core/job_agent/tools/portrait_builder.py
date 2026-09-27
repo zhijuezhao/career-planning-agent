@@ -24,15 +24,16 @@ def _strip_json_fences(text: str) -> str:
 
 
 _DEFAULT_PORTRAIT = {
-    "five_dimensions": {
-        "technical": {"score": 3, "key_skills": []},
-        "experience": {"score": 3, "key_skills": []},
-        "soft_skills": {"score": 3, "key_skills": []},
-        "education": {"score": 3, "key_skills": []},
-        "responsibility": {"score": 3, "key_skills": []},
+    # 六维（2026-09-27 P5 起；原为英文五维）—— 维度名与学生侧**逐字相同**，
+    # 否则 `job_matcher` 逐维对比对不上。key_skills 只挂在「专业技术能力」下（用户拍板）。
+    "six_dimensions": {
+        "专业技术能力": {"score": 3, "key_skills": []},
+        "实践经验背景": {"score": 3},
+        "通用软素质": {"score": 3},
+        "职业匹配度": {"score": 3},
+        "成长潜力": {"score": 3},
+        "基础资质条件": {"score": 3},
     },
-    "career_paths": [],
-    "transition_roles": [],
     "outlook": {
         "outlook": "成熟",
         "trend": "",
@@ -41,24 +42,31 @@ _DEFAULT_PORTRAIT = {
     "summary": "",
 }
 
-#: 我们认的画像键
-_PORTRAIT_KEYS = ("five_dimensions", "outlook", "summary", "career_paths", "transition_roles")
+#: 我们认的画像键（`career_paths` / `transition_roles` 已移出：那两列属**岗位信息**，
+#: 由 `career_fields.py` 确定性解析；晋升/换岗最终走"画像相似度匹配"，不由这里猜）
+_PORTRAIT_KEYS = ("six_dimensions", "outlook", "summary")
 
 #: ⚠️ **键名漂移兜底**（2026-09-27 实测 deepseek 同一提示词不同行给不同名字）：
 #: `five_dimension_ability` / `profile_summary` / `development_outlook` …
 #: 只认一个名字的话，模型换个写法下游就取不到值、**静默落回默认画像**（全 3 分/「成熟」/空摘要）。
 #: 治本是提示词里钉死模板（`prompts/job_portrait.py`），这里是第二道防线。
 _KEY_ALIASES: dict[str, str] = {
-    "five_dimension_ability": "five_dimensions",
-    "five_dimension": "five_dimensions",
-    "five_dims": "five_dimensions",
-    "dimensional_scores": "five_dimensions",
+    # 旧口径（英文五维时代）的顶层键 → 新键：老生产者/老模型输出仍能收下，不再丢画像
+    "five_dimensions": "six_dimensions",
+    "five_dimension_ability": "six_dimensions",
+    "five_dimension": "six_dimensions",
+    "five_dims": "six_dimensions",
+    "dimensional_scores": "six_dimensions",
+    "six_dims": "six_dimensions",
+    "six_dimension": "six_dimensions",
     "development_outlook": "outlook",
     "career_outlook": "outlook",
     "industry_outlook": "outlook",
     "profile_summary": "summary",
     "job_summary": "summary",
     "portrait_summary": "summary",
+    # 旧口径里被移出画像的两项：显式丢弃（它们在 _PORTRAIT_KEYS 之外 → 会进 unknown，
+    # 但先归一成原样更便于日志里看清"模型又产了这两项"）
     "promotion_path": "career_paths",
     "promotion_paths": "career_paths",
     "possible_paths": "career_paths",
@@ -79,8 +87,8 @@ def _resolve_model_keys(data: dict) -> tuple[dict, list[str]]:
     return resolved, unknown
 
 
-def _is_usable_five_dimensions(value: object) -> bool:
-    """五维必须是「有至少一个维度带整数 score 的字典」——否则它对匹配毫无用处。"""
+def _is_usable_dimensions(value: object) -> bool:
+    """六维必须是「有至少一个维度带整数 score 的字典」——否则它对匹配毫无用处。"""
     if not isinstance(value, dict):
         return False
     return any(isinstance(dim, dict) and isinstance(dim.get("score"), int) for dim in value.values())
@@ -99,16 +107,16 @@ def _normalise_outlook(value: object) -> dict:
 async def portrait_builder(job_data: str) -> dict:
     """Generate a deep job portrait from cleaned job data using LLM.
 
-    Produces a five-dimension profile (technical, experience, soft skills,
-    education, responsibility), career paths, transition directions, and
-    outlook assessment.
+    Produces a **six-dimension requirement-intensity** profile (专业技术能力 / 实践经验背景 /
+    通用软素质 / 职业匹配度 / 成长潜力 / 基础资质条件 —— 与**学生侧同名**，但评的是
+    "**岗位要求多高**"而非"这个人有多强"，两套评分标准见 `core/dimensions/rubrics.py`),
+    plus an outlook assessment and a summary.
 
     Args:
         job_data: JSON string of the cleaned job record.
 
     Returns:
-        Dict with five_dimensions (dict), career_paths (list),
-        transition_roles (list), outlook (dict), summary (str),
+        Dict with six_dimensions (dict), outlook (dict), summary (str),
         **plus** ``portrait_ok`` (bool) and ``portrait_error`` (str | None).
 
     ⚠️ **失败不再静默**：失败时仍返回一份默认结构（让流水线能继续），但
@@ -116,11 +124,12 @@ async def portrait_builder(job_data: str) -> dict:
     历史教训：原先失败只留一条 warning，于是 `#853` 的 82 行里约 73 行是默认值，
     而 `data_import_jobs.stats` 写着 `failed: 0`、`errors: []`（见主计划 §20.1）。
 
-    ⚠️ **字段归属**：本工具产出的画像字段只有 `five_dimensions` / `outlook` / `summary`
-    属于「岗位画像」，会被 `job_persist_service.apply_job_portrait` 按白名单写入。
-    返回里的 `career_paths` / `transition_roles` **不再写进岗位信息列** —— 那两列属于
-    「岗位信息」，由 `core/job_agent/career_fields.py` 对源文本做**确定性解析**
-    （用户 2026-09-27 要求岗位信息与岗位画像分开）。字段分组见 `field_groups.py`。
+    ⚠️ **字段归属**：本工具产出的画像字段只有 `six_dimensions` / `outlook` / `summary`，
+    会被 `job_persist_service.apply_job_portrait` 按白名单写入（`six_dimensions` 落
+    `job_profiles.requirement_intensity`）。`career_paths` / `transition_roles`
+    **不属于画像** —— 它们由 `core/job_agent/career_fields.py` 对源文本做**确定性解析**；
+    晋升/换岗的最终形态是**基于画像相似度的匹配**（用户 2026-09-27 拍板），不由这里猜。
+    字段分组见 `field_groups.py`。
     """
     logger.info("Portrait builder tool | job_data_len={}", len(job_data))
 
@@ -139,13 +148,13 @@ async def portrait_builder(job_data: str) -> dict:
             data = json.loads(cleaned)
             resolved, unknown = _resolve_model_keys(data)
 
-            five = resolved.get("five_dimensions")
+            dims = resolved.get("six_dimensions")
             summary = resolved.get("summary")
             # 「必需键缺失」才算失败；模型**多给**的键只记 warning（不该把好画像判成失败）
             blocking: list[str] = []
             warnings: list[str] = []
-            if not _is_usable_five_dimensions(five):
-                blocking.append("five_dimensions 缺失或不可用")
+            if not _is_usable_dimensions(dims):
+                blocking.append("six_dimensions 缺失或不可用")
             if not (isinstance(summary, str) and summary.strip()):
                 blocking.append("summary 为空")
             if unknown:
@@ -160,11 +169,9 @@ async def portrait_builder(job_data: str) -> dict:
                 logger.info("Portrait 载荷有额外键（不影响使用）| warnings={}", warnings)
 
             return {
-                "five_dimensions": (
-                    five if _is_usable_five_dimensions(five) else _DEFAULT_PORTRAIT["five_dimensions"]
+                "six_dimensions": (
+                    dims if _is_usable_dimensions(dims) else _DEFAULT_PORTRAIT["six_dimensions"]
                 ),
-                "career_paths": resolved.get("career_paths") or [],
-                "transition_roles": resolved.get("transition_roles") or [],
                 "outlook": _normalise_outlook(resolved.get("outlook")),
                 "summary": summary if isinstance(summary, str) else "",
                 "portrait_ok": not blocking,

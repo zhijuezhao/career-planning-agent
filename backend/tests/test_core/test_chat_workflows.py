@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from app.core.chat.viz import is_valid_viz
@@ -19,8 +20,11 @@ from app.core.chat.workflows import (
     job_catalog,
 )
 from app.domain.models.job import JobProfile, JobRawData
-from sqlalchemy import func, select
+from app.domain.services.job_persist_service import upsert_job_profile
+from sqlalchemy import func, select, text
 from tests.conftest import test_session_factory
+
+_PREFIX = f"wfcatalog_{int(time.time())}"
 
 
 class TestClassifyTitle:
@@ -75,6 +79,42 @@ class TestClassifyTitle:
 
 
 class TestJobCatalog:
+    @pytest.fixture(scope="class", autouse=True)
+    def ensure_some_jobs(self):
+        """保证库里**至少有一条**岗位（用完清掉自己造的那些）。
+
+        为什么需要：本类用例是**对账型**的 —— `viz` 的行数、分布各段之和必须等于
+        库里的岗位总数（见下面 `_EmptyResultSession` 的旧注释"真库现在有 82 条，替不掉"）。
+        也就是说它们**默认库非空**；库一旦被清空（2026-09-27 用户清库）就整类全红。
+        这里只补"非空"，不动库里的其他数据。
+        """
+
+        async def _ensure() -> bool:
+            async with test_session_factory() as session:
+                total = (
+                    await session.execute(select(func.count()).select_from(JobProfile))
+                ).scalar() or 0
+                if total:
+                    return False  # 库里有数据，不插手
+                for suffix in ("甲", "乙"):
+                    await upsert_job_profile(session, {"title": f"{_PREFIX}_{suffix}"})
+                await session.commit()
+                return True
+
+        created = asyncio.run(_ensure())
+        yield
+        if created:
+
+            async def _cleanup() -> None:
+                async with test_session_factory() as session:
+                    await session.execute(
+                        text("DELETE FROM job_profiles WHERE title LIKE :p"),
+                        {"p": f"{_PREFIX}%"},
+                    )
+                    await session.commit()
+
+            asyncio.run(_cleanup())
+
     @staticmethod
     def _run(params: dict) -> tuple[object, int]:
         """跑工作流，同时把库里的岗位总数带回来（用于对账）。"""

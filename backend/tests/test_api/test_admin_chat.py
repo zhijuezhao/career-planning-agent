@@ -1,9 +1,17 @@
 
+import asyncio
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from app.domain.models.job import JobProfile
+from app.domain.services.job_persist_service import upsert_job_profile
 from app.main import app
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select, text
+from tests.conftest import test_session_factory
+
+_VIZ_PREFIX = f"cviz_{int(time.time())}"
 
 
 @pytest.fixture(scope="module")
@@ -69,6 +77,41 @@ class TestChatVizExposureC1:
     这条链路就是**挂载点 A 的数据源**：学生端提问 → L1 命中工作流 → viz 落库 →
     管理端拿 `GET /admin/chat/messages?session_id=...` 渲染图表。
     """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def ensure_some_jobs(self):
+        """保证库里**至少有一条**岗位（用完清掉自己造的）。
+
+        为什么要：本用例问「有哪些岗位」→ L1 `job_catalog` 命中 → 产表格 viz；
+        但**空库时工作流故意不发图**（"不编数据"，见 `workflows.job_catalog` 的早退分支）
+        → `assert viz` 必红。这个用例写的时候库里有 82 条真岗位，
+        2026-09-27 用户清库后暴露。这里只补"非空"，不动库里的其他数据。
+        """
+
+        async def _ensure() -> bool:
+            async with test_session_factory() as session:
+                total = (
+                    await session.execute(select(func.count()).select_from(JobProfile))
+                ).scalar() or 0
+                if total:
+                    return False
+                await upsert_job_profile(session, {"title": f"{_VIZ_PREFIX}_岗位"})
+                await session.commit()
+                return True
+
+        created = asyncio.run(_ensure())
+        yield
+        if created:
+
+            async def _cleanup() -> None:
+                async with test_session_factory() as session:
+                    await session.execute(
+                        text("DELETE FROM job_profiles WHERE title LIKE :p"),
+                        {"p": f"{_VIZ_PREFIX}%"},
+                    )
+                    await session.commit()
+
+            asyncio.run(_cleanup())
 
     def test_workflow_viz_reaches_admin_message_list(
         self, student_token: str, admin_token: str, client: TestClient

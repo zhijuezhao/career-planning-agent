@@ -70,6 +70,9 @@ PORTRAIT_FIELDS: frozenset[str] = frozenset(
 
 #: 导入流水线/画像工具用的**中间键** → 目标列名（仅用于跨模块传参，不是 DB 列）
 PIPELINE_KEY_TO_COLUMN: dict[str, str] = {
+    # 2026-09-27 P5：画像的维度块由**英文五维**改为**中文六维**，键名随之改名；
+    # 旧键 `five_dimensions` 保留映射（老生产者/老模型输出仍能收下，不至于静默丢画像）
+    "six_dimensions": "requirement_intensity",
     "five_dimensions": "requirement_intensity",
     "career_paths": "career_path",
     "transition_roles": "transition_paths",
