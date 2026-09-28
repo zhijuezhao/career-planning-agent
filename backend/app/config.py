@@ -79,6 +79,28 @@ class Settings(BaseSettings):
     # env `IMPORT_MAX_ROWS` 可覆盖，默认 100。
     import_max_rows: int = 100
 
+    # ── Link Enrich（B3-1，零 LLM）：表格里的链接字段 → 抓取 → 结构化提取 → 合并 ──
+    # 总开关默认 **false**（主计划 §4.5）：先让代码上线但不出网，验证后再打开。
+    link_enrich_enabled: bool = False
+    # 每次导入最多富化多少行 / 最多抓多少个唯一 URL —— 双重闸门。行数防"一次误上传
+    # 刷爆目标站"，URL 数防"一个备注格里塞了 50 条链接"。
+    link_enrich_max_rows: int = 20
+    link_enrich_max_urls: int = 30
+    # 单 URL 抓取超时（秒）
+    link_enrich_timeout_s: float = 20.0
+    # 并发抓取数。太大会被目标站限流/封 IP，也会挤压事件循环。
+    link_enrich_concurrency: int = 4
+    # 抓取缓存有效期（小时）。默认 7 天：岗位页一周内基本不变，
+    # 而"同一个文件重复导入"是最常见的操作，缓存能直接省掉整轮出网。
+    link_enrich_cache_ttl_hours: int = 168
+    # 单个响应的字节上限（2MB）。超过即截断并标记，避免超大页面吃光内存。
+    link_enrich_max_bytes: int = 2_000_000
+    # 从链接正文里最多取多少字符当 description（也是 B3-2 喂给模型的正文上限，
+    # 主计划 §4.1 L3 定的就是 ≤4k 字符）
+    link_enrich_max_text_chars: int = 4000
+    # 重定向最大跳数。**每一跳都会重新过 SSRF 守卫**，见 `link_enrich/fetch.py`。
+    link_enrich_max_redirects: int = 5
+
     # Web search - Tavily
     tavily_api_key: str = ""
     tavily_base_url: str = "https://api.tavily.com"

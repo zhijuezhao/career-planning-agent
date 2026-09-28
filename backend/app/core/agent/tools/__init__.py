@@ -3,6 +3,7 @@ from langchain_core.tools import BaseTool
 from app.config import get_settings
 from app.core.agent.tools.jobs import job_detail, job_search
 from app.core.agent.tools.knowledge import career_knowledge_search
+from app.core.agent.tools.link_fetch import link_fetch
 from app.core.agent.tools.matching import gap_analysis, job_compare
 from app.core.agent.tools.report_tool import generate_career_report
 from app.core.agent.tools.safety import content_safety_check
@@ -19,6 +20,7 @@ __all__ = [
     "job_compare",
     "job_detail",
     "job_search",
+    "link_fetch",
     "user_snapshot",
     "web_search",
 ]
@@ -32,6 +34,8 @@ AGENT_TOOLS: list[BaseTool] = [
     # C3（P5）：六维对比 —— 会产 radar viz（工具产图链路见 nodes._split_tool_viz）
     gap_analysis,
     job_compare,
+    # C4（P6）：抓招聘链接并抽字段。**服务端出网**，所以走 link_enrich 的 SSRF 守卫
+    link_fetch,
     career_knowledge_search,
     content_safety_check,
     web_search,

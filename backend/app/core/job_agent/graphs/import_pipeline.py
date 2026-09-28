@@ -30,6 +30,12 @@ class JobImportState(TypedDict, total=False):
     # Stage 3: Dedup
     deduped_rows: list[dict]
 
+    # Stage 3.5: Link Enrich（B3-1，零 LLM）
+    #: 富化后的行（字段已按「表格值优先」补齐）。**放质检之前**：链接补出来的
+    #: 公司/薪资/描述参与质检，本来就该判 C/B 的行不会因"表格没写"被误判 D。
+    enriched_rows: list[dict]
+    link_enrich_stats: dict
+
     # Stage 4: Quality Judge
     quality_results: list[dict]
     passed_rows: list[dict]       # A/B/C grade rows
@@ -114,6 +120,41 @@ async def node_dedup(state: JobImportState) -> dict:
     return {"deduped_rows": deduped, "status": "deduped"}
 
 
+async def node_link_enrich(state: JobImportState) -> dict:
+    """第 3.5 阶段（B3-1）：用表格里的链接补齐字段。**零 LLM**。
+
+    位置是**去重之后、质检之前**（2026-09-27 用户拍板）：
+
+    - 去重之后：同一岗位的多行只抓一次，省 HTTP；
+    - 质检之前：质检按「信息完整性/描述质量/薪资信息」判 D。如果链接里明明有
+      公司/薪资/描述，却因为**表格没写**被判 D 丢掉，那富化就白做了 ——
+      链接值先合并进来，质检看到的才是这一行的真实完整度。
+
+    开关关闭（`LINK_ENRICH_ENABLED=false`，默认）时只回统计、**不动数据**：
+    上线初期代码在库里但不出网（主计划 §4.5）。
+    """
+    from app.core.link_enrich import EnrichConfig, enrich_rows
+    from app.infrastructure.database import async_session_factory
+
+    cfg = EnrichConfig.from_settings()
+    rows = state.get("deduped_rows") or []
+    if not cfg.enabled:
+        logger.info("Import: link enrich 未启用，跳过 | rows={}", len(rows))
+        return {"link_enrich_stats": {"enabled": False, "rows_scanned": len(rows)}}
+
+    # 缓存表要读写，所以这里自己开 session（与 node_persist 同一做法：
+    # 节点不接收外部 session，避免长事务跨阶段持有连接）
+    async with async_session_factory() as session:
+        try:
+            enriched, stats = await enrich_rows(rows, session=session, config=cfg)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+    return {"enriched_rows": enriched, "link_enrich_stats": stats, "status": "enriched"}
+
+
 async def node_quality_judge(state: JobImportState) -> dict:
     import json
 
@@ -126,7 +167,8 @@ async def node_quality_judge(state: JobImportState) -> dict:
     # 按体裁选评分口径（A/B 层）：职业发展路线表用自适应口径，否则会被结构性判 D
     genre = str((state.get("schema_profile") or {}).get("genre") or "job_posting")
 
-    for row in state["deduped_rows"]:
+    # 优先用链接富化后的行（`node_link_enrich` 未产出时回落去重结果）
+    for row in state.get("enriched_rows") or state["deduped_rows"]:
         job_data_str = json.dumps(row, ensure_ascii=False)
         judge_result = await quality_judge.ainvoke({"job_data": job_data_str, "genre": genre})
         results.append(judge_result)
@@ -307,6 +349,7 @@ def build_import_pipeline() -> StateGraph:
     graph.add_node("load_data", node_load_data)
     graph.add_node("clean_data", node_clean_data)
     graph.add_node("dedup", node_dedup)
+    graph.add_node("link_enrich", node_link_enrich)
     graph.add_node("quality_judge", node_quality_judge)
     graph.add_node("extract", node_extract)
     graph.add_node("portrait", node_portrait)
@@ -315,7 +358,8 @@ def build_import_pipeline() -> StateGraph:
     graph.set_entry_point("load_data")
     graph.add_edge("load_data", "clean_data")
     graph.add_edge("clean_data", "dedup")
-    graph.add_edge("dedup", "quality_judge")
+    graph.add_edge("dedup", "link_enrich")
+    graph.add_edge("link_enrich", "quality_judge")
     graph.add_edge("quality_judge", "extract")
     graph.add_edge("extract", "portrait")
     graph.add_edge("portrait", "persist")

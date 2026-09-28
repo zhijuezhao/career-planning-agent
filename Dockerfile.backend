@@ -22,6 +22,14 @@ RUN pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
 # ↑ pytest / pytest-asyncio：与 pyproject [tool.poetry.group.dev.dependencies] 对齐。
 #   容器重建后若不带这两个包，`docker exec ... python -m pytest` 会报 No module named pytest
 #   （2026-09-18 实测踩坑：镜像重建丢失一次性 pip 安装的测试工具链）。
+#
+# B3-1（2026-09-27，用户已批准新增依赖）：链接富化的正文提取。
+#   - `lxml` 此前**只是传递依赖**（装上了但没人声明，见 2026-09-27 实测 lxml 6.1.3 已在），
+#     而它是 JSON-LD/og 解析与 B3-2 XPath 的基础，必须显式钉住 —— 靠传递依赖意味着
+#     哪天上游拆包就会静默消失；
+#   - `trafilatura` 负责从招聘页里抽出**正文**（去导航/广告/推荐位），是 description
+#     字段的主要来源，也是 B3-2 喂给模型前把 token 压到最小的关键。
+RUN pip install --no-cache-dir lxml trafilatura
 
 # Copy application code
 COPY backend/ /app/backend/

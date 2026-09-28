@@ -161,6 +161,11 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
         for column, items in career_facts.items():
             if getattr(existing, column) in _EMPTY:
                 setattr(existing, column, items)
+        # B3-1：链接富化产物。两列此前只在 DDL 里存在、ORM 没映射 → 谁也写不进去；
+        # 现在补上映射（见 `models/job.py`）。同样只填空：后来的"没有链接的导入"
+        # 不该把上一次富化拿到的来源与统计抹掉。
+        existing.source_url = _pick(data, "source_url", existing.source_url)
+        existing.enrich_stats = _pick(data, "enrich_stats", existing.enrich_stats)
         # 画像字段交给独立写入器（白名单，只碰 PORTRAIT_FIELDS）
         apply_job_portrait(existing, data)
         profile, created = existing, False
@@ -177,6 +182,9 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
             career_path=career_facts.get("career_path") or None,
             transition_paths=career_facts.get("transition_paths") or None,
             certificates=career_facts.get("certificates") or None,
+            # B3-1：链接来源与富化统计（无链接导入时为 None）
+            source_url=data.get("source_url"),
+            enrich_stats=data.get("enrich_stats"),
             # ⚠️ 不写 `company_id`：岗位是角色级的，公司归属全在 `job_company_links`。
             #    该列已由任务 3 从表上删除，留着只会造成"两个真相来源"。
         )

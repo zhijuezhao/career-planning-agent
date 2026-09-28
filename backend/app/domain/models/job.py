@@ -46,6 +46,13 @@ class JobProfile(Base):
     outlook: Mapped[dict | None] = mapped_column(JSONB)
     summary: Mapped[str | None] = mapped_column(Text)
     source_data_ids: Mapped[dict | None] = mapped_column(JSONB)
+    # B3-1（2026-09-27）：两列此前**只在 DDL 里存在、ORM 没映射**
+    # （`apply_ddl.py:260-269` 早已 ADD COLUMN），所以任何代码都写不进也读不出。
+    # 现在补上映射 —— 没有任何 DDL 改动。
+    #: 该岗位的招聘来源链接（表格「岗位链接」列或链接富化命中的 URL）
+    source_url: Mapped[str | None] = mapped_column(Text)
+    #: 链接富化的逐行统计（命中的层级/填充了哪些字段/冲突/provenance）
+    enrich_stats: Mapped[dict | None] = mapped_column(JSONB)
     # ⚠️ 这里**没有** `company_id`（B2-2 加过、2026-09-27 任务 3 删除）：
     # 岗位↔公司是多对多，"谁在招谁"的唯一真相是 `job_company_links`。
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

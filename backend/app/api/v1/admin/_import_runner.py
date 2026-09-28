@@ -34,13 +34,16 @@ IMPORT_MAX_ROWS = get_settings().import_max_rows
 # ``progress_pct = processed_rows / total_rows``（子计划 §1.4 不改前端契约），
 # 因此阶段进度按 ``total_rows`` 折算进 ``processed_rows``，而不是新增字段。
 # B2-2：末尾多了一个真正落库的 persist 阶段，故 portrait 从 100 降到 92。
+# B3-1（2026-09-27）：插入 link_enrich 阶段 → 8 个阶段重新分配百分比。
+# **必须保持严格递增**：前端进度条只认"只增不减"，回退会被看成卡死。
 STAGE_PROGRESS: dict[str, int] = {
-    "load_data": 16,
-    "clean_data": 33,
-    "dedup": 50,
-    "quality_judge": 66,
-    "extract": 83,
-    "portrait": 92,
+    "load_data": 14,
+    "clean_data": 28,
+    "dedup": 40,
+    "link_enrich": 50,
+    "quality_judge": 60,
+    "extract": 72,
+    "portrait": 86,
     "persist": 100,
 }
 
@@ -159,6 +162,14 @@ def _apply_stage(job: DataImportJob, node: str, state: dict) -> None:
         # B2-2：落库统计可见（前端导入详情可直接展示"入库 N 条 / 新建 vs 更新"）
         persist_stats = state.get("persist_stats") or {}
         job.stats = {**(job.stats or {}), "persist": persist_stats}
+
+    if node == "link_enrich":
+        # B3-1：链接富化统计（发现多少链接、抓了几个、命中 JSON-LD 几个、
+        # 补了哪些字段、有没有撞预算上限）。开关关闭时也会写一条 enabled=false，
+        # 让"为什么这次没富化"在导入详情里自解释。
+        enrich_stats = state.get("link_enrich_stats") or {}
+        if enrich_stats:
+            job.stats = {**(job.stats or {}), "link_enrich": enrich_stats}
 
     if node == "portrait":
         # 2026-09-27：画像成功/失败计数落库。原先 portrait 失败静默返回默认值，
