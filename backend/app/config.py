@@ -100,6 +100,16 @@ class Settings(BaseSettings):
     link_enrich_max_text_chars: int = 4000
     # 重定向最大跳数。**每一跳都会重新过 SSRF 守卫**，见 `link_enrich/fetch.py`。
     link_enrich_max_redirects: int = 5
+    # ── B3-2：L3（LLM 精简提取）的**独立开关**，默认 off ──
+    # 为什么与 `link_enrich_enabled` 分开（2026-09-27 用户裁决 A）：零成本层（L0/L1/L2）
+    # 与 LLM 层（L3）的风险完全不同 —— 前者只花流量、后者花 token。分开之后可以先只开
+    # 零成本层跑一段时间，确认抓取质量与目标站限流情况，再单开这一层。
+    link_enrich_llm_enabled: bool = False
+    # LLM 预算（§4.5）。**0 或负数 = 不限制**；要彻底关掉 LLM 层请用上面的开关。
+    # 花费规模由"这张表里有多少个不同域名"决定，那是上传者决定的，所以必须有闸门。
+    # 超限只停止后续调用并标 `budget_exceeded`，**保留**已得到的规则结果。
+    link_enrich_max_llm_calls: int = 10
+    link_enrich_max_tokens: int = 50_000
 
     # Web search - Tavily
     tavily_api_key: str = ""

@@ -49,8 +49,10 @@ FUNCTION_KEYS: tuple[FunctionKeyMeta, ...] = (
     FunctionKeyMeta("job_quality", "导入-质检", "chat", "default"),
     FunctionKeyMeta("job_extract", "导入-结构化提取", "chat", "default"),
     FunctionKeyMeta("job_portrait", "导入-画像", "chat", "default"),
-    # B3-2 才接调用点：现在可绑定，但不会生效（wired=False 会在「功能路由」页提示）
-    FunctionKeyMeta("job_link_extract", "链接字段解析（LLM + XPath）", "chat", "default", wired=False),
+    # B3-2 已接上调用点：链接富化 L3（`core/link_enrich/llm_extract.py`）用它调模型。
+    # ⚠️ 该层还有**自己的开关** `LINK_ENRICH_LLM_ENABLED`（默认关）+ 调用数/token 预算：
+    # 这里绑定了模型、但开关没开时依然一次都不会调用。
+    FunctionKeyMeta("job_link_extract", "链接字段解析（LLM + XPath）", "chat", "default"),
     # B4-1：未绑定时回退 env `resume_llm_model`（历史配置项，此前从未被读取）
     FunctionKeyMeta(
         "resume_parse",

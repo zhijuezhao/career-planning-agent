@@ -569,9 +569,19 @@ class TestConnectivity:
 class TestB41Wiring:
     def test_routes_expose_wired_flag(self, client, admin_token):
         routes = _routes(client, admin_token)
-        # job_link_extract 的调用点在 B3-2 才接 → 可绑定但不生效
-        assert routes["job_link_extract"]["wired"] is False
-        for key in ("default", "job_quality", "job_extract", "job_portrait", "resume_parse", "embedding"):
+        # B3-2 起 `job_link_extract` 的调用点已接（`core/link_enrich/llm_extract.py`）
+        # → 不再是"可绑定但不生效"。**绑定它不等于会调用**：链接富化的 LLM 层还有
+        # 自己的开关 `LINK_ENRICH_LLM_ENABLED`（默认关）。
+        assert routes["job_link_extract"]["wired"] is True
+        for key in (
+            "default",
+            "job_quality",
+            "job_extract",
+            "job_portrait",
+            "job_link_extract",
+            "resume_parse",
+            "embedding",
+        ):
             assert routes[key]["wired"] is True, key
 
     def test_bind_resume_parse_is_effective(self, client, admin_token, provider, chat_model):
@@ -589,7 +599,33 @@ class TestB41Wiring:
 
         assert get_llm_gateway().resolve_function_key("resume_parse") is None
 
-    def test_unwired_route_binds_but_warns(self, client, admin_token, chat_model):
+    def test_unwired_route_binds_but_warns(self, client, admin_token, chat_model, monkeypatch):
+        """「可绑定但未接线」这条**机制**仍要覆盖 —— 将来加新键还会经过这个阶段。
+
+        现在没有永久 `wired=False` 的键了（`job_link_extract` 已被 B3-2 接上），
+        所以把某个键临时标成未接线来测这条路径，而不是留着生产代码里的假状态。
+        """
+        import app.api.v1.admin.system as system_module
+        from app.core.llm.registry import FUNCTION_KEYS, FunctionKeyMeta
+
+        def _unwire(meta: FunctionKeyMeta) -> FunctionKeyMeta:
+            return FunctionKeyMeta(
+                meta.key, meta.label, meta.kind, meta.fallback,
+                wired=False, env_setting=meta.env_setting,
+            )
+
+        patched = tuple(
+            _unwire(m) if m.key == "job_link_extract" else m for m in FUNCTION_KEYS
+        )
+        # ⚠️ 两个都要打：列表端点用 `FUNCTION_KEYS`，绑定端点用 `FUNCTION_KEY_MAP`
+        # （`wired` 来自后者，只改前者的话绑定响应仍然会说"已接线"）
+        monkeypatch.setattr(system_module, "FUNCTION_KEYS", patched)
+        monkeypatch.setattr(
+            system_module,
+            "FUNCTION_KEY_MAP",
+            {m.key: m for m in patched},
+        )
+
         try:
             resp = _bind(client, admin_token, "job_link_extract", chat_model["id"])
             assert resp.status_code == 200, resp.text

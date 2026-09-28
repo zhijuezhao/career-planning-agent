@@ -389,8 +389,10 @@ def _route_response(
         f"{provider.name}:{model.model_name}" if model is not None and provider is not None else None
     )
     warning: str | None = None
-    # 可绑定但调用点还没接：配置是「存下来」了，但不能说它生效
-    unwired_warning = "调用点尚未接入（B3-2 链接解析才用到），绑定暂不生效" if not meta.wired else None
+    # 可绑定但调用点还没接：配置是「存下来」了，但不能说它生效。
+    # （B3-2 起 `job_link_extract` 已接上，所以这句目前不会命中；保留是因为
+    #   将来加新键时仍会先经历"可绑定、未接线"这个阶段。）
+    unwired_warning = "调用点尚未接入，绑定暂不生效" if not meta.wired else None
 
     if route is None:
         pass  # 未配置 → env

@@ -34,7 +34,8 @@ import httpx
 from loguru import logger
 
 from app.config import get_settings
-from app.core.link_enrich.extract import extract_page
+from app.core.link_enrich.budget import LlmBudget
+from app.core.link_enrich.extract import extract_page, parse_html
 from app.core.link_enrich.fetch import (
     CACHE_VERSION,
     FetchOutcome,
@@ -42,10 +43,13 @@ from app.core.link_enrich.fetch import (
     load_cache,
     store_cache,
 )
+from app.core.link_enrich.llm_extract import learn_link_fields
 from app.core.link_enrich.merge import merge_link_fields
 from app.core.link_enrich.safety import resolve_host
+from app.core.link_enrich.templates import load_templates, record_outcome
 from app.core.link_enrich.urls import discover_row_urls, domain_of, group_by_domain
 from app.core.link_enrich.urls import url_hash as make_url_hash
+from app.core.link_enrich.xpath import EXTRACTABLE_FIELDS, apply_xpath
 
 #: 统计里各类列表的长度上限（JSONB 是要落库的，不能无限增长）
 MAX_LIST = 20
@@ -67,6 +71,10 @@ class EnrichConfig:
     max_bytes: int = 2_000_000
     max_text_chars: int = 4000
     max_redirects: int = 5
+    #: B3-2：L3（LLM 精简提取）独立开关，默认关（用户裁决 A）
+    llm_enabled: bool = False
+    max_llm_calls: int = 10
+    max_tokens: int = 50_000
 
     @classmethod
     def from_settings(cls, settings=None) -> EnrichConfig:
@@ -81,6 +89,9 @@ class EnrichConfig:
             max_bytes=int(s.link_enrich_max_bytes),
             max_text_chars=int(s.link_enrich_max_text_chars),
             max_redirects=int(s.link_enrich_max_redirects),
+            llm_enabled=bool(s.link_enrich_llm_enabled),
+            max_llm_calls=int(s.link_enrich_max_llm_calls),
+            max_tokens=int(s.link_enrich_max_tokens),
         )
 
 
@@ -103,6 +114,10 @@ class _UrlPayload:
     error: str | None = None
     blocked_reason: str | None = None
     truncated: bool = False
+    #: 该 URL 的原始响应体（**仅现抓的**有；缓存命中的没有，L2/L3 只对现抓的页跑）
+    body: bytes | None = None
+    #: 本页是否已经过 L2/L3（XPath 模板 / LLM 学习）。写进缓存用于"层升级后不复用旧缓存"
+    llm_layer: bool = False
 
     def to_cache(self) -> dict:
         return {
@@ -114,6 +129,10 @@ class _UrlPayload:
             "tiers_hit": list(self.tiers_hit),
             "text": self.text,
             "truncated": self.truncated,
+            # L2/L3 的成果也进缓存（fields 里已含），并标记"这一份是带 LLM 层的"。
+            # 规则：**零成本层写的缓存不会被 LLM 层复用** —— 否则用户刚打开 LLM 开关
+            # 却因为缓存命中而看不到任何变化，会以为功能没生效（见 `enrich_rows` 读缓存段）。
+            "llm": self.llm_layer,
         }
 
     @classmethod
@@ -130,7 +149,114 @@ class _UrlPayload:
             text=payload.get("text") or "",
             from_cache=True,
             ok=bool(payload.get("fields") or payload.get("text")),
+            llm_layer=bool(payload.get("llm")),
         )
+
+
+async def _apply_templates_and_llm(
+    payloads: dict[str, _UrlPayload],
+    *,
+    cfg: EnrichConfig,
+    session,
+    budget: LlmBudget,
+    stats: dict,
+    now: datetime | None,
+) -> None:
+    """L2（模板复用，零 LLM）→ L3（LLM 学模板，每域一次）。
+
+    只处理**现抓的页**：缓存命中的 payload 没有响应体，而且它的字段本就是
+    上一次（可能带 L2/L3）的结果 —— 没有重算的必要。
+
+    L2 **不受 LLM 开关约束**：模板是已经付过费学到的资产，复用它是零成本的。
+    只有"学新模板"（L3）才需要 LLM 开关与预算。
+    """
+    template_cache: dict[str, dict[str, str]] = {}
+    attempted_domains: set[str] = set()
+
+    for target, payload in payloads.items():
+        if payload.from_cache or not payload.ok or not payload.body:
+            continue
+        if cfg.llm_enabled:
+            # 标记"这一份缓存是在 LLM 层开启时写的" → 以后可被复用（见读缓存段）
+            payload.llm_layer = True
+
+        wanted = [f for f in EXTRACTABLE_FIELDS if not payload.fields.get(f)]
+        if not wanted:
+            continue
+
+        tree = parse_html(payload.body)
+        if tree is None:
+            _bounded(stats["errors"], f"{target}：L2/L3 跳过（HTML 解析失败）")
+            continue
+
+        domain = domain_of(target)
+
+        # ── L2：用已学的模板取值（0 调用、0 网络）───────────────────────
+        if domain not in template_cache:
+            template_cache[domain] = (
+                await load_templates(session, domain) if session is not None else {}
+            )
+        templates = template_cache[domain]
+        # 循环变量别叫 `field`：它会遮蔽 `dataclasses.field`（本模块顶部导入了它）
+        for field_name in list(wanted):
+            expr = templates.get(field_name)
+            if not expr:
+                continue
+            values = apply_xpath(tree, expr, limit=1)
+            hit = bool(values and values[0].strip())
+            if session is not None:
+                await record_outcome(session, domain, field_name, hit=hit, now=now)
+            if not hit:
+                continue
+            payload.fields[field_name] = values[0].strip()
+            payload.tier_of[field_name] = "xpath"
+            stats["template_hits"] += 1
+            wanted.remove(field_name)
+
+        if not wanted:
+            continue
+
+        # ── L3：还缺字段才学（每域一次，受开关与预算约束）────────────────
+        if not cfg.llm_enabled:
+            continue
+        if domain in attempted_domains:
+            continue
+        attempted_domains.add(domain)
+
+        result = await learn_link_fields(
+            domain=domain,
+            tree=tree,
+            text=payload.text,
+            session=session,
+            budget=budget,
+            fields=tuple(wanted),
+            max_text_chars=cfg.max_text_chars,
+        )
+        if result.skipped:
+            key = result.skipped
+            stats["llm_skipped"][key] = stats["llm_skipped"].get(key, 0) + 1
+        if result.error:
+            _bounded(stats["errors"], f"L3@{domain}：{result.error}")
+        if result.learned:
+            _bounded(stats["llm_domains"], domain)
+            stats["templates_learned"] += len(result.learned)
+        for name, value in result.fields.items():
+            payload.fields[name] = value
+            payload.tier_of[name] = "llm"
+
+
+def _merge_budget_stats(stats: dict, budget: LlmBudget) -> None:
+    """把预算账本并进统计。
+
+    `budget_exceeded` 要**或**上去而不是覆盖：URL 预算（max_rows/max_urls）也会把它
+    置真，而 LLM 预算只是另一个来源。覆盖会把先前的"撞了 URL 上限"抹掉。
+    """
+    llm = budget.as_stats()
+    stats["llm_calls"] = llm["llm_calls"]
+    stats["tokens_used"] = llm["tokens_used"]
+    stats["tokens_input"] = llm["tokens_input"]
+    stats["tokens_output"] = llm["tokens_output"]
+    stats["budget_exceeded"] = bool(stats.get("budget_exceeded")) or bool(llm["budget_exceeded"])
 
 
 async def _fetch_and_extract(
@@ -173,6 +299,7 @@ async def _fetch_and_extract(
         ok=bool(facts.fields or facts.text),
         error=facts.error,
         truncated=outcome.truncated,
+        body=outcome.body,
     )
     return payload, outcome
 
@@ -214,6 +341,15 @@ async def enrich_rows(
         "blocked": [],
         "errors": [],
         "budget_exceeded": False,
+        # ── B3-2（L2/L3）─────────────────────────────────────────────
+        "template_hits": 0,
+        "templates_learned": 0,
+        "llm_calls": 0,
+        "tokens_used": 0,
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "llm_domains": [],
+        "llm_skipped": {},
     }
     if not cfg.enabled:
         logger.info("Link Enrich 未启用（LINK_ENRICH_ENABLED=false），跳过")
@@ -273,9 +409,15 @@ async def enrich_rows(
             cached = await load_cache(session, url, now=now)
             if cached is None:
                 misses.append(url)
-            else:
-                payloads[url] = _UrlPayload.from_cached_payload(url, cached)
-                stats["cache_hits"] += 1
+                continue
+            # 缓存与 LLM 层的**一致性规则**：零成本层写的缓存（`llm=false`）在 LLM 层
+            # 打开后**不再复用** —— 否则用户刚打开开关却因缓存命中而看不到任何变化，
+            # 会以为功能没生效。代价是一次重新抓取（受 urls 预算约束）。
+            if cfg.llm_enabled and not cached.get("llm"):
+                misses.append(url)
+                continue
+            payloads[url] = _UrlPayload.from_cached_payload(url, cached)
+            stats["cache_hits"] += 1
     else:
         misses = list(unique_urls)
 
@@ -301,7 +443,14 @@ async def enrich_rows(
             payloads[target] = payload
             outcomes[target] = outcome
 
-    # ── 4. 写缓存（串行 DB）─────────────────────────────────────────────
+    # ── 4. L2 模板复用 + L3 LLM 学模板（只对"现抓的页"）─────────────────
+    budget = LlmBudget(max_calls=cfg.max_llm_calls, max_tokens=cfg.max_tokens)
+    await _apply_templates_and_llm(
+        payloads, cfg=cfg, session=session, budget=budget, stats=stats, now=now
+    )
+    _merge_budget_stats(stats, budget)
+
+    # ── 5. 写缓存（串行 DB；放在 L2/L3 之后，好让缓存带上它们的成果与标记）──
     if session is not None:
         for target, payload in payloads.items():
             if payload.from_cache:
