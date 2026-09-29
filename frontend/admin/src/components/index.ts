@@ -10,6 +10,7 @@
  */
 
 export { default as DetailDialog } from './DetailDialog.vue'
+export { default as LinkEnrichPanel } from './LinkEnrichPanel.vue'
 export { default as MarkdownPreview } from './MarkdownPreview.vue'
 export { default as VizPreview } from './VizPreview.vue'
 

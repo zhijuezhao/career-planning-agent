@@ -250,12 +250,17 @@ def _merge_budget_stats(stats: dict, budget: LlmBudget) -> None:
 
     `budget_exceeded` 要**或**上去而不是覆盖：URL 预算（max_rows/max_urls）也会把它
     置真，而 LLM 预算只是另一个来源。覆盖会把先前的"撞了 URL 上限"抹掉。
+
+    B3-3 起同时写 `budget_llm_exceeded`（LLM 那一半，来源明确）。
+    `budget_url_exceeded` 由 URL 预算的两处截断点自己置真，这里不碰 ——
+    它可能在**没走到 LLM 层**时就已是真（如 `unique_urls` 为空提前返回）。
     """
     llm = budget.as_stats()
     stats["llm_calls"] = llm["llm_calls"]
     stats["tokens_used"] = llm["tokens_used"]
     stats["tokens_input"] = llm["tokens_input"]
     stats["tokens_output"] = llm["tokens_output"]
+    stats["budget_llm_exceeded"] = bool(llm["budget_exceeded"])
     stats["budget_exceeded"] = bool(stats.get("budget_exceeded")) or bool(llm["budget_exceeded"])
 
 
@@ -326,6 +331,10 @@ async def enrich_rows(
         "rows_scanned": len(rows),
         "rows_with_url": 0,
         "rows_enriched": 0,
+        # B3-3（2026-09-29）：`rows_enriched` 只代表"至少抓到一个页面"，可能一个字段
+        # 都没补到（页面抓到了但没有可用字段）。真正能回答"富化到底有没有用"的是
+        # 这个数 —— **至少补到 1 个字段**的行数。两者都留着，差值即"白抓的行"。
+        "rows_fields_filled": 0,
         "rows_budget_skipped": 0,
         "urls_found": 0,
         "urls_unique": 0,
@@ -340,6 +349,12 @@ async def enrich_rows(
         "conflicts": [],
         "blocked": [],
         "errors": [],
+        # B3-3（2026-09-29）：一个 `budget_exceeded` 说不清是撞了哪个上限 ——
+        # URL 上限（max_rows/max_urls，由**上传者的行数**决定）与 LLM 上限
+        # （调用次数/token，由**表里有几个域**决定）的处置方式完全不同，UI 必须分开。
+        # `budget_exceeded` 保留为两者的**或**（向后兼容既有测试与验收脚本）。
+        "budget_url_exceeded": False,
+        "budget_llm_exceeded": False,
         "budget_exceeded": False,
         # ── B3-2（L2/L3）─────────────────────────────────────────────
         "template_hits": 0,
@@ -371,12 +386,14 @@ async def enrich_rows(
             continue
         if planned_rows >= cfg.max_rows:
             stats["rows_budget_skipped"] += 1
+            stats["budget_url_exceeded"] = True
             stats["budget_exceeded"] = True
             continue
         planned_rows += 1
         kept: list[str] = []
         for url in urls:
             if len(unique_urls) >= cfg.max_urls:
+                stats["budget_url_exceeded"] = True
                 stats["budget_exceeded"] = True
                 break
             key = make_url_hash(url)
@@ -540,6 +557,9 @@ async def enrich_rows(
 
         if per_row:
             stats["rows_enriched"] += 1
+            # B3-3：只有真的补到字段才算"富化有产出"（抓到了页但 0 字段不算）
+            if filled:
+                stats["rows_fields_filled"] += 1
             for key in filled:
                 stats["fields_filled"][key] = stats["fields_filled"].get(key, 0) + 1
             new_row["enrich_stats"] = {

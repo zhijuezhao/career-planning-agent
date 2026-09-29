@@ -16,6 +16,7 @@ from app.core.link_enrich import service
 from app.core.link_enrich.llm_extract import LearnResult
 from app.core.link_enrich.service import EnrichConfig, enrich_rows
 from app.core.link_enrich.templates import save_template
+from app.core.llm.usage import TokenUsage
 from app.domain.models.link_fetch_cache import LinkFetchCache
 from app.domain.models.link_xpath_template import LinkXpathTemplate
 from sqlalchemy import delete, select, text
@@ -269,6 +270,48 @@ class TestL3SwitchAndDomainGranularity:
                 )
                 await session.commit()
                 assert stats["llm_skipped"].get("budget") == 1
+
+        asyncio.run(_run())
+
+    def test_exhausted_llm_budget_sets_llm_flag_only(self, monkeypatch):
+        """B3-3：LLM 预算用尽要**单独**点亮 `budget_llm_exceeded`。
+
+        这里的假 `learn` 复刻真实实现的预算用法（调前 `can_call()`、调后 `spend()`），
+        所以被挡时 `LlmBudget.blocked` 会置真 —— 这正是 `budget_llm_exceeded` 的来源。
+        同时断言 `budget_url_exceeded` 仍为假：URL 预算没被碰过，两个标志必须分得开。
+        """
+        d1, d2 = f"y{uuid.uuid4().hex[:8]}.example.com", f"y{uuid.uuid4().hex[:8]}.example.com"
+        RESOLVER_MAP[d1] = RESOLVER_MAP[d2] = ["93.184.216.34"]
+        u1, u2 = _url(d1), _url(d2)
+
+        async def fake_learn(**kwargs):
+            budget = kwargs["budget"]
+            if not budget.can_call():
+                return LearnResult(skipped="budget")
+            budget.spend(TokenUsage(10, 5, 15))
+            return LearnResult()
+
+        monkeypatch.setattr(service, "learn_link_fields", fake_learn)
+
+        async def _run():
+            async with test_session_factory() as session:
+                _out, stats = await enrich_rows(
+                    [
+                        {"title": "A", "salary": None, "note": u1},
+                        {"title": "B", "salary": None, "note": u2},
+                    ],
+                    session=session,
+                    config=_config(llm_enabled=True, max_llm_calls=1),
+                    client=_client({u1: (200, HTML, PAGE.encode()), u2: (200, HTML, PAGE.encode())}),
+                    resolver=_resolver,
+                )
+                await session.commit()
+                assert stats["llm_calls"] == 1
+                assert stats["llm_skipped"].get("budget") == 1
+                assert stats["budget_llm_exceeded"] is True
+                assert stats["budget_url_exceeded"] is False
+                assert stats["budget_exceeded"] is True      # 向后兼容
+                assert stats["tokens_used"] == 15
 
         asyncio.run(_run())
 

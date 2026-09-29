@@ -9,8 +9,15 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
 import { get, post } from '@/api/request'
-import { DetailDialog } from '@/components'
+import { DetailDialog, LinkEnrichPanel } from '@/components'
 import type { DetailTag } from '@/components'
+import {
+  enrichCell,
+  enrichMarkdown,
+  enrichTags,
+  type EnrichCell,
+  type LinkEnrichStats,
+} from '@/utils/linkEnrich'
 import { errorsToMarkdown, formatBytes, formatDateTime, progressPercent } from '@/utils/preview'
 
 interface ImportJob {
@@ -49,6 +56,8 @@ interface ImportPersistStats {
 interface ImportStats {
   schema?: ImportSchema
   persist?: ImportPersistStats
+  /** B3-1/B3-2 链接富化统计（B3-3 起在导入页专门展示） */
+  link_enrich?: LinkEnrichStats
 }
 
 /** 体裁 → 中文（与后端 schema_detect 的取值一致） */
@@ -255,6 +264,33 @@ const statsMarkdown = computed(() => {
   return lines.join('\n')
 })
 
+// ── 链接富化统计（B3-3）────────────────────────────────────────────────────
+// 「专门展示」：把 `stats.link_enrich` 从通用「stats JSON」页签里拎出来，按口径分组渲染。
+// 文案与数字全部来自 `@/utils/linkEnrich`（纯函数），这里只管接线。
+// ⚠️ 口径说明（含易读错的 rows_enriched / token / 预算截断）写在该模块头部。
+
+const enrichVisible = ref(false)
+const enrichJob = ref<ImportJob | null>(null)
+
+const openEnrich = (row: ImportJob) => {
+  enrichJob.value = row
+  enrichVisible.value = true
+}
+
+const enrichStats = computed<LinkEnrichStats | null>(
+  () => enrichJob.value?.stats?.link_enrich ?? null,
+)
+
+const enrichDialogTags = computed<DetailTag[]>(() => enrichTags(enrichStats.value))
+const enrichDialogMarkdown = computed(() => enrichMarkdown(enrichStats.value))
+
+/** 列表「链接富化」列的摘要：预计算成 id → 单元格，避免模板里重复调用 */
+const enrichCells = computed<Record<number, EnrichCell | null>>(() => {
+  const out: Record<number, EnrichCell | null> = {}
+  for (const row of tableData.value) out[row.id] = enrichCell(row.stats?.link_enrich)
+  return out
+})
+
 onMounted(fetchData)
 onBeforeUnmount(stopProgressPolling)
 </script>
@@ -317,8 +353,29 @@ onBeforeUnmount(stopProgressPolling)
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="链接富化" min-width="170">
           <template #default="{ row }">
+            <span v-if="!enrichCells[row.id]" class="muted">—</span>
+            <span
+              v-else
+              :class="enrichCells[row.id]?.truncated ? 'warn' : 'enrich-summary'"
+              :title="enrichCells[row.id]?.truncated ? '本次触达预算上限，富化被截断' : undefined"
+            >
+              {{ enrichCells[row.id]?.text }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="210" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              type="primary"
+              size="small"
+              link
+              :disabled="!row.stats?.link_enrich"
+              @click="openEnrich(row)"
+            >
+              富化
+            </el-button>
             <el-button
               type="primary"
               size="small"
@@ -371,6 +428,23 @@ onBeforeUnmount(stopProgressPolling)
       json-label="stats JSON"
       empty-text="（本次导入无统计信息）"
     />
+
+    <DetailDialog
+      v-model="enrichVisible"
+      title="链接富化统计"
+      :subtitle="enrichJob ? `${enrichJob.file_name} · 任务 #${enrichJob.id}` : ''"
+      :tags="enrichDialogTags"
+      :markdown="enrichDialogMarkdown"
+      :json="enrichStats ?? {}"
+      json-label="link_enrich JSON"
+      empty-text="（本次导入没有链接富化统计）"
+      width="780px"
+      max-height="68vh"
+    >
+      <template #preview-extra>
+        <LinkEnrichPanel :stats="enrichStats" />
+      </template>
+    </DetailDialog>
   </div>
 </template>
 
@@ -425,6 +499,18 @@ onBeforeUnmount(stopProgressPolling)
 
 .muted {
   color: #909399;
+}
+
+/* 链接富化摘要（B3-3）：预算截断时改用警示色，正常时弱化以免抢主列的注意力 */
+.enrich-summary {
+  font-size: 12px;
+  color: #606266;
+}
+
+.warn {
+  font-size: 12px;
+  font-weight: 600;
+  color: #b88230;
 }
 
 .sep {

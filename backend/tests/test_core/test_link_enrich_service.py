@@ -54,6 +54,15 @@ OG_PAGE = """<html><head><meta property="og:title" content="产品经理" />
 <meta property="og:description" content="负责需求分析" /></head>
 <body><p>x</p></body></html>"""
 
+#: B3-3 用：**只有 og:title、正文为空**的页面。`title` 刻意不可填（它是去重键，
+#: 见 `merge.py:25`），而 text 层取不出任何正文（`<body>` 空）→ 页面抓取成功
+#: （`ok = bool(fields or text)` 为真）但**一个字段都补不到**。
+#: 这正是 `rows_enriched` 与 `rows_fields_filled` 必须分开的原因。
+#: ⚠️ 别往 body 里塞任何文字：哪怕一个 `<p>x</p>` 都会让 text 层产出
+#: `description`（可填），用例就失去意义了（2026-09-29 实测踩到）。
+TITLE_ONLY_PAGE = """<html><head><meta property="og:title" content="产品经理" /></head>
+<body></body></html>"""
+
 
 def _client(routes: dict, *, raise_on: str | None = None) -> httpx.AsyncClient:
     """把 URL → (status, headers, body) 的映射做成假 HTTP 客户端。"""
@@ -271,6 +280,52 @@ class TestBudgetGates:
         assert stats["urls_unique"] == 1
         assert stats["budget_exceeded"] is True
 
+    async def test_url_budget_flag_is_split_from_llm_budget(self):
+        """B3-3：URL 上限只该点亮 `budget_url_exceeded`，不能冒充 LLM 预算。
+
+        `budget_exceeded` 保留为两者的"或"，所以它单独看**说不清撞了哪个** ——
+        这正是本次要拆开的原因。
+        """
+        rows = [
+            {"title": f"岗位{i}", "company": None, "source_url": "https://jobs.example.com/1"}
+            for i in range(4)
+        ]
+        client = _client({"https://jobs.example.com/1": (200, HTML, JSONLD_PAGE)})
+        _out, stats = await enrich_rows(
+            rows,
+            config=EnrichConfig(enabled=True, max_rows=2, max_urls=10),
+            client=client,
+            resolver=_resolver,
+        )
+        assert stats["budget_url_exceeded"] is True
+        assert stats["budget_llm_exceeded"] is False
+        assert stats["budget_exceeded"] is True
+
+    async def test_max_urls_trip_sets_url_budget_flag(self):
+        rows = [{"title": "A", "note": "https://a.example.com/1 https://b.example.com/2"}]
+        client = _client(
+            {
+                "https://a.example.com/1": (200, HTML, JSONLD_PAGE),
+                "https://b.example.com/2": (200, HTML, OG_PAGE),
+            }
+        )
+        _out, stats = await enrich_rows(
+            rows,
+            config=EnrichConfig(enabled=True, max_rows=5, max_urls=1),
+            client=client,
+            resolver=_resolver,
+        )
+        assert stats["budget_url_exceeded"] is True
+        assert stats["budget_llm_exceeded"] is False
+
+    async def test_no_budget_trip_leaves_both_flags_false(self):
+        rows = [{"title": "Java", "company": None, "source_url": "https://jobs.example.com/1"}]
+        client = _client({"https://jobs.example.com/1": (200, HTML, JSONLD_PAGE)})
+        _out, stats = await enrich_rows(rows, config=CFG, client=client, resolver=_resolver)
+        assert stats["budget_url_exceeded"] is False
+        assert stats["budget_llm_exceeded"] is False
+        assert stats["budget_exceeded"] is False
+
     async def test_same_url_in_two_rows_is_fetched_once(self):
         rows = [
             {"title": "A", "company": None, "source_url": "https://jobs.example.com/1"},
@@ -290,6 +345,48 @@ class TestBudgetGates:
             out, _stats = await enrich_rows(rows, config=CFG, client=client, resolver=_resolver)
             runs.append(out[0])
         assert runs[0] == runs[1]
+
+
+class TestFieldsFilledAccounting:
+    """B3-3：`rows_enriched`（抓到页）与 `rows_fields_filled`（真补到字段）不是一回事。
+
+    抓取成功 ≠ 富化有产出：页面可能只有 `title`（刻意不可填）或什么都没有。
+    只报 `rows_enriched` 会让人误以为"这批数据补上了"，所以两个数都要记。
+    """
+
+    async def test_page_with_only_unfillable_title_counts_as_enriched_but_not_filled(self):
+        rows = [{"title": "Java", "company": None, "source_url": "https://jobs.example.com/1"}]
+        client = _client({"https://jobs.example.com/1": (200, HTML, TITLE_ONLY_PAGE)})
+        _out, stats = await enrich_rows(rows, config=CFG, client=client, resolver=_resolver)
+        assert stats["urls_fetched"] == 1
+        assert stats["rows_enriched"] == 1, "页面确实抓到了"
+        assert stats["rows_fields_filled"] == 0, "但一个字段都没补到"
+        assert stats["fields_filled"] == {}
+
+    async def test_row_with_fillable_field_counts_as_filled(self):
+        rows = [{"title": "Java", "company": None, "source_url": "https://jobs.example.com/1"}]
+        client = _client({"https://jobs.example.com/1": (200, HTML, JSONLD_PAGE)})
+        out, stats = await enrich_rows(rows, config=CFG, client=client, resolver=_resolver)
+        assert stats["rows_enriched"] == 1
+        assert stats["rows_fields_filled"] == 1
+        assert out[0]["company"] == "示例科技"
+
+    async def test_filled_rows_never_exceed_enriched_rows(self):
+        """不变式：补到字段的行必然是"抓到过页"的行 —— 两个数一起看才有意义。"""
+        rows = [
+            {"title": "A", "company": None, "source_url": "https://jobs.example.com/1"},
+            {"title": "B", "company": None, "source_url": "https://jobs.example.com/2"},
+        ]
+        client = _client(
+            {
+                "https://jobs.example.com/1": (200, HTML, JSONLD_PAGE),
+                "https://jobs.example.com/2": (200, HTML, TITLE_ONLY_PAGE),
+            }
+        )
+        _out, stats = await enrich_rows(rows, config=CFG, client=client, resolver=_resolver)
+        assert stats["rows_enriched"] == 2
+        assert stats["rows_fields_filled"] == 1
+        assert stats["rows_fields_filled"] <= stats["rows_enriched"]
 
 
 class TestCache:
