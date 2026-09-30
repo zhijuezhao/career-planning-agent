@@ -271,9 +271,33 @@ for _province, _cities in OFFICIAL_PROVINCE_CITIES.items():
         GEO_ALIASES[_short_city] = _short_city
 del _province, _cities, _short_province, _short_city, _city
 
+#: 省级写法 → 省短名（`normalise_geo_name(kind="province")` 用）。
+#: 与 `GEO_ALIASES` 分开是因为**省/市必须能分辨**：`吉林` 既是省短名也是市短名（吉林市），
+#: 只靠一张合并表无法回答"这个值是省还是市"。
+PROVINCE_ALIASES: dict[str, str] = {}
+#: 城市写法 → 市短名（`normalise_geo_name(kind="city")` 用）
+CITY_ALIASES: dict[str, str] = {}
+for _province, _cities in OFFICIAL_PROVINCE_CITIES.items():
+    _sp = _shorten(_province)
+    PROVINCE_ALIASES[_province] = _sp
+    PROVINCE_ALIASES[_sp] = _sp
+    for _city in _cities:
+        _sc = _shorten(_city)
+        CITY_ALIASES[_city] = _sc
+        CITY_ALIASES[_sc] = _sc
+del _province, _cities, _sp, _city, _sc
+
+#: 市短名集合（"城市短名出现在任意位置"的兜底匹配用）
+CITY_SHORT: frozenset[str] = frozenset(
+    city for _cities in PROVINCE_CITIES.values() for city in _cities
+)
+
 __all__ = [
+    "CITY_ALIASES",
+    "CITY_SHORT",
     "GEO_ALIASES",
     "OFFICIAL_PROVINCE_CITIES",
+    "PROVINCE_ALIASES",
     "PROVINCE_CITIES",
     "_shorten",
 ]

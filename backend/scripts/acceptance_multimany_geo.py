@@ -52,6 +52,12 @@ PREFIX = f"acc5_{int(time.time())}"
 IMPORT_REGION, IMPORT_CITY = "广东省", "深圳市"
 EXPECT_REGION, EXPECT_CITY = "广东", "深圳"
 
+#: §31.11 ①（2026-09-29 用户裁决）：**区级 + 链式**写法必须收敛到正确的**级别**。
+#: 老行为只剥最后一个后缀 → `杭州市余杭`（既不是市也不是区），**按市筛选永远匹配不上**。
+#: 这里同时覆盖两种形态：region 是链式（省+市），city 是区级（市+区）。
+DISTRICT_IMPORT_REGION, DISTRICT_IMPORT_CITY = "浙江省杭州市", "杭州市余杭区"
+DISTRICT_EXPECT_REGION, DISTRICT_EXPECT_CITY = "浙江", "杭州"
+
 
 class Checker:
     def __init__(self) -> None:
@@ -137,13 +143,27 @@ async def seed() -> dict[str, int]:
             session,
             {"title": title, "company": f"{PREFIX}_乙", "region": "北京市", "city": "北京市"},
         )
+        # §31.11 ①：**另起一条岗位**（不动上面那条，免得破坏"1 岗位 + 2 关联"的断言）
+        district_profile, _ = await upsert_job_profile(
+            session,
+            {
+                "title": f"{PREFIX}_区级写法岗",
+                "company": f"{PREFIX}_丙",
+                "region": DISTRICT_IMPORT_REGION,
+                "city": DISTRICT_IMPORT_CITY,
+            },
+        )
         await session.commit()
 
         from app.domain.models.company import Company
         from sqlalchemy import select
 
-        ids: dict[str, int] = {"job": int(profile.id)}
-        for alias, name in (("company_a", f"{PREFIX}_甲"), ("company_b", f"{PREFIX}_乙")):
+        ids: dict[str, int] = {"job": int(profile.id), "job_district": int(district_profile.id)}
+        for alias, name in (
+            ("company_a", f"{PREFIX}_甲"),
+            ("company_b", f"{PREFIX}_乙"),
+            ("company_c", f"{PREFIX}_丙"),
+        ):
             ids[alias] = int(
                 (await session.execute(select(Company.id).where(Company.name == name))).scalar_one()
             )
@@ -170,7 +190,20 @@ async def facts(ids: dict[str, int]) -> dict[str, object]:
                 {"i": ids["job"]},
             )
         ).scalar_one()
-        return {"region": company[0], "city": company[1], "scale": company[2], "links": links}
+        district = (
+            await session.execute(
+                text("SELECT region, city FROM companies WHERE id = :i"),
+                {"i": ids["company_c"]},
+            )
+        ).one()
+        return {
+            "region": company[0],
+            "city": company[1],
+            "scale": company[2],
+            "links": links,
+            "district_region": district[0],
+            "district_city": district[1],
+        }
 
 
 async def cleanup() -> None:
@@ -216,6 +249,27 @@ async def run_checks(base: str, username: str, password: str, keep: bool) -> int
             f"（下发 {IMPORT_REGION!r}/{IMPORT_CITY!r}）",
         )
         c.check("多对多：是 1 条岗位 + 2 条关联", stored["links"] == 2, f"links={stored['links']}")
+
+        # ── §31.11 ①：区级 / 链式写法收敛到正确的**级别** ────────────────────
+        # 这是"按市筛选匹配不上"的直接回归：老行为会存下 `杭州市余杭`。
+        c.check(
+            "区级/链式写法收敛到正确的级别（市→杭州、省→浙江）",
+            (stored["district_region"], stored["district_city"])
+            == (DISTRICT_EXPECT_REGION, DISTRICT_EXPECT_CITY),
+            f"库内 region/city = {stored['district_region']!r}/{stored['district_city']!r}"
+            f"（下发 {DISTRICT_IMPORT_REGION!r}/{DISTRICT_IMPORT_CITY!r}）",
+        )
+        status, data = http(
+            base,
+            "/api/v1/admin/jobs",
+            token=token,
+            params={"region": DISTRICT_EXPECT_REGION, "city": DISTRICT_EXPECT_CITY},
+        )
+        c.check(
+            f"区级写法入库后，按「{DISTRICT_EXPECT_REGION}/{DISTRICT_EXPECT_CITY}」**筛得到**",
+            status == 200 and ids["job_district"] in [i["id"] for i in data["items"]],
+            f"status={status} total={data.get('total') if isinstance(data, dict) else data}",
+        )
 
         # ── ① 地域筛选（短名口径，coalesce(关联行, 公司)）──────────────────────
         job_id = ids["job"]

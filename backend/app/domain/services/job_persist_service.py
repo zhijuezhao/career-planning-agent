@@ -39,6 +39,8 @@ from app.core.job_agent.career_fields import extract_career_fields
 from app.core.job_agent.field_groups import portrait_payload
 from app.domain.models.job import JobProfile, JobRawData
 from app.domain.services.company_service import (
+    GEO_KIND_CITY,
+    GEO_KIND_PROVINCE,
     link_job_company,
     normalise_geo_name,
     refresh_job_count,
@@ -124,8 +126,8 @@ async def upsert_job_profile(session: AsyncSession, data: dict) -> tuple[JobProf
 
     # 招聘所在地（省/市）：归一化为**短名**（与下选项同一套规则）+ 过滤占位值
     # （老数据的 `city` 是「未知」，不能当真实地域）
-    region = normalise_geo_name(data.get("region"))
-    city = normalise_geo_name(data.get("city"))
+    region = normalise_geo_name(data.get("region"), kind=GEO_KIND_PROVINCE)
+    city = normalise_geo_name(data.get("city"), kind=GEO_KIND_CITY)
 
     company = await upsert_company(
         session,

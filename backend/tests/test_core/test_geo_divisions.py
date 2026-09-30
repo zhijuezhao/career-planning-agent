@@ -122,3 +122,75 @@ class TestNormaliseGeoName:
     def test_placeholders_and_blank_become_none(self, raw):
         """占位值**不能**当真实地域入库（否则"在未知招的岗位"污染地域筛选）。"""
         assert normalise_geo_name(raw) is None
+
+
+class TestKindAwareNormalisation:
+    """§31.11 ①（2026-09-29 用户裁决）：省/市**分口径**收敛。
+
+    老行为只剥**最后一个**行政后缀 → `杭州市余杭区` → `杭州市余杭`，
+    得到的值既不是市也不是区，**按市筛选永远匹配不上**（B3-2 报告 → §31.11 ①）。
+
+    **不传 `kind` 的默认口径与老行为逐字一致**（上面 `TestNormaliseGeoName` 钉住），
+    所以这次改动对既有调用方零破坏。
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expect_city", "expect_province"),
+        [
+            # 区级：链接里最常见的形态 → 收敛到它所属的市
+            ("杭州市余杭区", "杭州", "杭州市余杭"),
+            ("深圳市南山区", "深圳", "深圳市南山"),
+            ("苏州工业园区", "苏州", "苏州工业园"),
+            # 直辖市：第二级就是自身（用户 2026-09-27 裁决"只做到省市"）
+            ("北京市海淀区", "北京", "北京"),
+            ("上海市浦东新区", "上海", "上海"),
+            ("北京市朝阳区", "北京", "北京"),
+            ("重庆市万州区", "重庆", "重庆"),
+            # 链式「省+市」：**这就是必须分口径的原因** ——
+            # 同一个值在 city 列要 `深圳`、在 region 列要 `广东`，一个字段无关的
+            # 函数给不出两个答案。
+            ("广东省深圳市", "深圳", "广东"),
+            ("广东省深圳市南山区", "深圳", "广东"),
+            ("浙江杭州余杭区", "杭州", "浙江"),
+            ("内蒙古自治区呼和浩特市新城区", "呼和浩特", "内蒙古"),
+            ("中国广东省深圳市", "深圳", "广东"),
+            # 干净值不受影响
+            ("杭州市", "杭州", "杭州"),
+            ("广东省", "广东", "广东"),
+            ("深圳", "深圳", "深圳"),
+        ],
+    )
+    def test_converges_to_the_right_level(self, raw, expect_city, expect_province):
+        assert normalise_geo_name(raw, kind="city") == expect_city
+        assert normalise_geo_name(raw, kind="province") == expect_province
+
+    def test_known_city_name_starting_with_a_province_is_not_mistaken(self):
+        """`海南藏族自治州`（青海）以省写法 `海南` 开头 —— 不能因此判成海南省。
+
+        它的短名恰好**也是** `海南`（与省短名同名），所以判据必须是"**输入本身**
+        是不是省级写法"，而不是"短名在不在省集合里"。这里钉住"与不传 kind 的结果
+        一致"，即**没有引入新的误判**。
+        """
+        assert normalise_geo_name("海南藏族自治州", kind="province") == normalise_geo_name(
+            "海南藏族自治州"
+        )
+        assert normalise_geo_name("吉林市", kind="province") == "吉林"  # 省短名=市短名，结果相同
+
+    def test_bare_district_is_not_guessed_from_thin_air(self):
+        """裸区名（不带市/省）**不做三级猜测**。
+
+        参考数据只到省市两级（用户 2026-09-27 要求），拿不到"这个区属于哪个市"的
+        依据 —— 所以只能退化成"剥后缀"，而**不能**凭空编一个市出来。
+        `朝阳区` 命中最长城市前缀会得到辽宁的 `朝阳`，这是已知歧义（见 docstring）。
+        """
+        assert normalise_geo_name("朝阳区", kind="city") == "朝阳"
+
+    def test_placeholders_still_none_in_both_kinds(self):
+        for raw in (None, "", "   ", "未知", "不限", "-", "--", "/"):
+            assert normalise_geo_name(raw, kind="city") is None
+            assert normalise_geo_name(raw, kind="province") is None
+
+    def test_unknown_kind_is_rejected_loudly(self):
+        """`kind` 写错要**立刻报错**，不能静默退回默认口径（否则口径错误无从发现）。"""
+        with pytest.raises(ValueError, match="kind"):
+            normalise_geo_name("广东", kind="district")

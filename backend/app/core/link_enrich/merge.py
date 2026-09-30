@@ -19,7 +19,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.domain.services.company_service import normalise_geo_name
+from app.domain.services.company_service import (
+    GEO_KIND_CITY,
+    GEO_KIND_PROVINCE,
+    normalise_geo_name,
+)
 
 #: 允许被链接值填充的字段（与 `upsert_job_profile` 读的行键一致）。
 #: **刻意不含 `title`**：它是去重键（`title_key` 唯一索引），按链接标题改写会让
@@ -99,7 +103,10 @@ def _normalise_for_fill(key: str, value: Any) -> Any:
     - 其余短字段：压掉多余空白（表格里常见全角空格）。
     """
     if key in GEO_FIELDS:
-        return normalise_geo_name(value)
+        # 省/市分口径收敛：链接里常写 `杭州市余杭区`（区级）或 `广东省深圳市`（链式），
+        # 只按字段名就能给出正确的那一级（2026-09-29 用户裁决，见 §31.11 ①）。
+        kind = GEO_KIND_CITY if key == "city" else GEO_KIND_PROVINCE
+        return normalise_geo_name(value, kind=kind)
     if not isinstance(value, str):
         return value
     if key in NO_CONFLICT_FIELDS:

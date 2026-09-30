@@ -23,6 +23,8 @@ from app.domain.models.job import JobProfile
 from app.domain.models.job_company_link import JobCompanyLink
 from app.domain.models.user import User
 from app.domain.services.company_service import (
+    GEO_KIND_CITY,
+    GEO_KIND_PROVINCE,
     aggregate_geo_options,
     normalise_geo_name,
     sync_all_job_counts,
@@ -177,8 +179,11 @@ async def update_company(
     for field, value in fields.items():
         # 省/市归一化为**短名**（与级联下拉同一套写法）：否则管理端手输「广东省」
         # 存进去后，下拉给出的却是「广东」→ 该行永远筛不到。
+        # 省/市还要**分口径**：同一个 `广东省深圳市` 存进 `region` 要 `广东`、
+        # 存进 `city` 要 `深圳`（2026-09-29 用户裁决）。
         if field in ("region", "city"):
-            value = normalise_geo_name(value)
+            kind = GEO_KIND_PROVINCE if field == "region" else GEO_KIND_CITY
+            value = normalise_geo_name(value, kind=kind)
         setattr(company, field, value)
 
     await db.flush()

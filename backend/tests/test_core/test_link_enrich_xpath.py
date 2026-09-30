@@ -229,3 +229,78 @@ class TestBuildCandidates:
         # 收益低、失效概率高
         assert "description" not in EXTRACTABLE_FIELDS
         assert "requirements" not in EXTRACTABLE_FIELDS
+
+
+class TestAsciiKeywordWordBoundary:
+    """§31.11 ②（2026-09-29 用户裁决）：ASCII 关键词按**词元**匹配，不做子串。
+
+    ⚠️ 交接文档原先把这一项描述成"候选生成偏中文、要补英文词表" —— **实测证明那是错的**：
+    `FIELD_KEYWORDS` 里 `salary` / `location` / `experience` / `company` 等英文词**本来就有**，
+    真实 Lever 页上也没有 `Salary`/`Level`/`Education` 这类**标签**（正则计数为 0），
+    那些字段拿到 0 个候选是**正确行为**。真正的毛病是**短英文词按子串误命中**：
+
+        `org` ⊂ `Georgia`     → 那个"地点列表" <div> 成了 `company` 的候选
+        `category` ⊂ class    → 同一个 <div> 又成了 `industry` 的候选
+
+    于是**同一个元素同时是 city/company/industry/salary 四个字段的候选** —— 正是坑 21 的
+    "静默取错值"。所以修法是**改匹配方式**，不是加词（加词只会加更多假阳性）。
+    """
+
+    def test_short_ascii_keyword_does_not_match_inside_a_word(self):
+        """`Georgia` 含子串 `org`，但那不代表这个元素是公司（真实 Lever 页的形态）。"""
+        page = """
+        <html><body>
+          <div class="posting-category medium-category-label location">
+            Atlanta, Georgia / Arlington, TX / Boston, MA
+          </div>
+        </body></html>
+        """
+        grouped = candidates_by_field(build_xpath_candidates(_tree(page)))
+        assert not grouped.get("company"), "`org` 不该命中 `Georgia` 的子串"
+
+    def test_hyphenated_class_still_matches_by_token(self):
+        """连字符就是词边界 —— `location` 仍必须命中真实的长 class 名（别修过头）。"""
+        page = """
+        <html><body>
+          <span id="secondary-additional-location-boston">Boston, MA</span>
+        </body></html>
+        """
+        grouped = candidates_by_field(build_xpath_candidates(_tree(page)))
+        assert grouped.get("city"), "`location` 应命中 `secondary-additional-location-boston`"
+
+    def test_english_class_keywords_still_match(self):
+        """正例：词表里的英文词在**词边界**上依然命中（修的是假阳性，不是砍功能）。"""
+        page = """
+        <html><body>
+          <div class="job-salary">$120,000 - $150,000</div>
+          <div class="company-name">Acme Inc</div>
+          <div class="job-experience">3+ years</div>
+        </body></html>
+        """
+        grouped = candidates_by_field(build_xpath_candidates(_tree(page)))
+        assert grouped.get("salary"), "`salary` 应命中 `job-salary`"
+        assert grouped.get("company"), "`company` 应命中 `company-name`"
+        assert grouped.get("experience_requirement"), "`experience`/`years` 应命中"
+
+    def test_cjk_keywords_still_match_as_substring(self):
+        """中文没有词边界概念 → 子串是唯一可行的判据（`薪资` 命中 `岗位薪资`）。"""
+        page = """
+        <html><body>
+          <div class="岗位薪资">25-40K·13薪</div>
+        </body></html>
+        """
+        grouped = candidates_by_field(build_xpath_candidates(_tree(page)))
+        assert grouped.get("salary"), "中文关键词必须仍走子串匹配"
+
+    def test_chinese_label_value_pairing_survives(self):
+        """词边界改动**不能**碰坏坑 21 那条"标签-值"配对定位式。"""
+        page = """
+        <html><body><ul>
+          <li><span class="p-label">薪资</span><span class="p-value">25-40K</span></li>
+          <li><span class="p-label">城市</span><span class="p-value">杭州</span></li>
+        </ul></body></html>
+        """
+        grouped = candidates_by_field(build_xpath_candidates(_tree(page)))
+        salary = grouped.get("salary", [])
+        assert salary, "中文标签-值结构应产出薪资候选"
+        assert "contains(., '薪资')" in salary[0].xpath, salary[0].xpath

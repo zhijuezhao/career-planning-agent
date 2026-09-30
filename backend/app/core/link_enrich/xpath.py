@@ -336,6 +336,51 @@ def _pair_locator(tree: Any, label: Any, value: Any, label_text: str) -> str | N
     return expr if _is_usable(tree, expr, max_matches=1) else None
 
 
+#: ASCII 词元（`secondary-additional-location-boston` → secondary / additional / location / boston）
+_ASCII_TOKEN_RE = re.compile(r"[a-z0-9]+")
+#: CJK 判定（中文关键词走子串匹配，见 `_Haystack.has_keyword`）
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+class _Haystack:
+    """一个元素的关键词匹配面：**小写原文** + **ASCII 词元集合**。
+
+    为什么要打包成一个对象：候选生成会按「元素 × 字段 × 关键词」反复匹配
+    （`MAX_SCANNED_ELEMENTS = 20000` 个元素 × 8 个字段 × 数个词 ≈ 几十万次）。
+    每次现拆词元会明显拖慢，所以**每个元素只拆一次**。
+    """
+
+    __slots__ = ("lower", "tokens")
+
+    def __init__(self, text: str) -> None:
+        self.lower = text.lower()
+        self.tokens = frozenset(_ASCII_TOKEN_RE.findall(self.lower))
+
+    def has_keyword(self, keyword: str) -> bool:
+        """关键词是否命中。**CJK 走子串、ASCII 走词边界**（2026-09-29 用户裁决）。
+
+        为什么必须分开（本批实测真实 Lever 页）：
+
+        - `org` 命中了 `Georgia`（Ge-**org**-ia）的子串 → 那个"地点列表" `<div>`
+          被当成 `company` 的候选；配上 `location` / `posting-category` 之后，
+          **同一个元素同时成了 city / company / industry / salary 四个字段的候选**
+          —— 正是坑 21 说的"静默取错值"；
+        - 按词元匹配后，`location` 仍能命中 `secondary-additional-location-boston`
+          （连字符就是词边界），所以**不误伤**真实的长 class 名；
+        - 中文没有词边界，子串是唯一可行的判据（`薪资` 命中 `岗位薪资`）。
+        """
+        if not keyword:
+            return False
+        low = keyword.lower()
+        if _CJK_RE.search(low):
+            return low in self.lower
+        parts = _ASCII_TOKEN_RE.findall(low)
+        if not parts:
+            return False
+        # 多词元关键词（如将来的 "work experience"）要求全部词元在场
+        return all(part in self.tokens for part in parts)
+
+
 def _signals(element: Any) -> str:
     """把"这个元素像不像某个字段"的证据拼成一个串（class/id/name/itemprop/tag）。"""
     parts: list[str] = []
@@ -348,15 +393,13 @@ def _signals(element: Any) -> str:
     return " ".join(parts).lower()
 
 
-def _score(field: str, signals: str, own_text: str) -> int:
+def _score(field: str, signals: _Haystack, own: _Haystack, own_len: int) -> int:
     """打分：属性命中 > 自身文本命中 > 只是"关键词的兄弟节点"。"""
     score = 0
-    lowered_text = own_text.lower()
     for keyword in FIELD_KEYWORDS.get(field, ()):
-        low = keyword.lower()
-        if low in signals:
+        if signals.has_keyword(keyword):
             score += 3
-        if low in lowered_text and len(own_text) <= 40:
+        if own.has_keyword(keyword) and own_len <= 40:
             # 自身文本就是"薪资"这类标签（而不是一整段正文）时才加分
             score += 2
     return score
@@ -421,18 +464,22 @@ def build_xpath_candidates(
 
         signals = _signals(element)
         own_text = " ".join((element.text or "").split())
+        # 每个元素只拆一次词元（见 `_Haystack` 的说明）
+        signals_hs = _Haystack(signals)
+        own_hs = _Haystack(own_text)
+        own_len = len(own_text)
 
         for field in wanted:
-            score = _score(field, signals, own_text)
+            score = _score(field, signals_hs, own_hs, own_len)
             if score > 0:
                 _offer(field, element, score + 1)
             # "标签-值"规则与"自身命中"**无关**，两者都要试：
             # `<span class="label">行业</span><span class="value">互联网</span>` 里，
             # 标签元素自己就命中关键词（own_text="行业"），如果这时 `continue`，
             # 真正想要的值元素就永远进不了候选（2026-09-27 实测踩到）。
-            if own_text and len(own_text) <= 12:
+            if own_text and own_len <= 12:
                 for keyword in FIELD_KEYWORDS[field]:
-                    if keyword.lower() in own_text.lower():
+                    if own_hs.has_keyword(keyword):
                         sibling = element.getnext()
                         if sibling is not None and isinstance(sibling.tag, str):
                             # 配对定位式给最高分：它能说清"哪一个值"，

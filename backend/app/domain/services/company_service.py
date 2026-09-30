@@ -21,7 +21,14 @@ from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.geo_divisions import GEO_ALIASES, PROVINCE_CITIES, _shorten
+from app.core.geo_divisions import (
+    CITY_ALIASES,
+    CITY_SHORT,
+    GEO_ALIASES,
+    PROVINCE_ALIASES,
+    PROVINCE_CITIES,
+    _shorten,
+)
 from app.domain.models.company import Company
 from app.domain.models.job_company_link import JobCompanyLink
 
@@ -43,19 +50,115 @@ def normalise_company_name(name: str | None) -> str | None:
     return text[:200]
 
 
-def normalise_geo_name(value: object) -> str | None:
+#: `normalise_geo_name(kind=...)` 的两种口径（省 / 市）
+GEO_KIND_PROVINCE = "province"
+GEO_KIND_CITY = "city"
+_GEO_KINDS = frozenset({GEO_KIND_PROVINCE, GEO_KIND_CITY})
+
+#: 前缀匹配的候选，**长名优先** —— 否则 `杭州市` 会被 `杭州` 抢先命中
+#: （结果相同，但长名优先对 `吉林市` 这类"省短名也是市短名"的值更稳）。
+_PROVINCE_PREFIXES: tuple[tuple[str, str], ...] = tuple(
+    sorted(PROVINCE_ALIASES.items(), key=lambda kv: (-len(kv[0]), kv[0]))
+)
+_CITY_PREFIXES: tuple[tuple[str, str], ...] = tuple(
+    sorted(CITY_ALIASES.items(), key=lambda kv: (-len(kv[0]), kv[0]))
+)
+
+#: 直辖市：省短名就是它自己的第二级（`北京` 省 → `北京` 市）。
+#: 所以 `北京市朝阳区` 剥掉省前缀后剩 `朝阳区`，在**本省候选里**找不到市前缀时，
+#: 应当回落到直辖市自身 —— 而**不是**去全表里撞 `朝阳`（辽宁朝阳市）。
+_MUNICIPALITY_SHORT = frozenset(
+    short for short, cities in PROVINCE_CITIES.items() if short in cities
+)
+
+
+def _leading_province(text: str) -> tuple[str, str] | None:
+    """`text` 以某个省级写法开头、且后面还有内容 → 返回 `(匹配到的写法, 省短名)`。"""
+    for key, short in _PROVINCE_PREFIXES:
+        if text.startswith(key) and len(text) > len(key):
+            return key, short
+    return None
+
+
+def _leading_city(text: str, pool: tuple[str, ...] | None = None) -> str | None:
+    """`text` 开头命中的**最长**城市短名。
+
+    `pool` 给定时只在其内找（用于"省已确定"的场合，能挡掉别省同名城市的误配）。
+    """
+    if pool is not None:
+        best = ""
+        for short in pool:
+            if text.startswith(short) and len(short) > len(best):
+                best = short
+        return best or None
+    for key, short in _CITY_PREFIXES:
+        if text.startswith(key):
+            return short
+    return None
+
+
+def _contained_city(text: str) -> str | None:
+    """兜底：城市短名出现在 `text` 的**任意位置**（`中国广东省深圳市` → `深圳`）。
+
+    只在"前缀完全不中"之后才用 —— 它比前缀弱，但**远好过**剥后缀得到的、
+    永远筛不到的残值。
+    """
+    best = ""
+    for short in CITY_SHORT:
+        if short in text and len(short) > len(best):
+            best = short
+    return best or None
+
+
+def _contained_province(text: str) -> str | None:
+    """兜底：省级写法出现在 `text` 的**任意位置**（`中国广东省深圳市` → `广东`）。"""
+    best = ""
+    best_short = ""
+    for key, short in _PROVINCE_PREFIXES:
+        if key in text and len(key) > len(best):
+            best, best_short = key, short
+    return best_short or None
+
+
+def normalise_geo_name(value: object, *, kind: str | None = None) -> str | None:
     """省/市名归一化为**短名**；无意义的值返回 None。
 
-    三步（顺序即优先级）：
+    四步（顺序即优先级）：
 
     1. 空白 / 占位值（`未知`、`不限`、`-`…）→ `None`。清洗阶段给缺失城市填的「未知」
        **不能**当真实地域入库，否则"在未知招的岗位"会污染按地域的筛选与统计；
     2. **命中参考表** → 用表里的短名。参考表同时收录官方全名与短名，
        所以 `广东省`、`广东` 都会变成 `广东`；
-    3. 未命中 → 按行政后缀剥一层（`_shorten`），仍为空则 `None`。
+    3. `kind` 给定时的**按级别收敛**（见下）；
+    4. 未命中 → 按行政后缀剥一层（`_shorten`），仍为空则 `None`。
 
     ⚠️ 写库与**下拉选项**共用这一套规则（用户 2026-09-27 裁决"统一短名"）：
     否则导入写进来的是 `广东省`、下拉给出的是 `广东`，筛选就永远对不上。
+
+    ## `kind`：为什么省和市必须分开问（2026-09-29 用户裁决）
+
+    **不传 `kind` = 与 2026-09-27 的行为逐字一致**（零破坏）。传了就按级别收敛：
+
+    | 输入 | `kind=None`（老行为） | `kind="city"` | `kind="province"` |
+    |---|---|---|---|
+    | `杭州市余杭区` | `杭州市余杭` ❌ | `杭州` | `杭州市余杭` |
+    | `深圳市南山区` | `深圳市南山` ❌ | `深圳` | `深圳市南山` |
+    | `广东省深圳市` | `广东省深圳` ❌ | `深圳` | `广东` |
+    | `广东省深圳市南山区` | `广东省深圳市南山` ❌ | `深圳` | `广东` |
+    | `内蒙古自治区呼和浩特市新城区` | `…市新城` ❌ | `呼和浩特` | `内蒙古` |
+    | `北京市朝阳区` | `北京市朝阳` ❌ | `北京` | `北京` |
+
+    老行为的问题：只剥**最后**一个后缀，得到的 `杭州市余杭` 既不是市也不是区，
+    **按市筛选永远匹配不上**（B3-2 报告 → §31.11 ①）。
+
+    **为什么要两个口径而不是一个更聪明的函数**：`city` 列可能是链式写法
+    `广东省深圳市`，同一个值在 `region` 列的正确答案是 `广东` ——
+    **字段无关的函数无法同时给出这两个答案**。
+
+    ⚠️ **已知歧义（不猜）**：**裸区名**（只有 `朝阳区`、不带市/省）无法判断属于哪个市，
+    会命中最长城市前缀 `朝阳`（辽宁朝阳市），而它多半是北京朝阳区。
+    参考数据**只做到省市两级**（用户 2026-09-27 要求），三级数据不在表内 ——
+    这里不做猜测，也不为此引入第三级数据。
     """
     if value is None:
         return None
@@ -63,9 +166,57 @@ def normalise_geo_name(value: object) -> str | None:
     if not text or text.lower() in _GEO_PLACEHOLDERS:
         return None
 
+    if kind is not None and kind not in _GEO_KINDS:
+        raise ValueError(f"未知的 kind：{kind!r}（只接受 None / 'province' / 'city'）")
+
     canonical = GEO_ALIASES.get(text)
     if canonical:
-        return canonical
+        if kind is None:
+            return canonical
+        # 分口径：要判断**输入本身**是不是该级别的写法，而不是"短名恰好也在该级别里"。
+        # 反例（2026-09-29 实测）：`海南藏族自治州`（青海）的短名是 `海南`，而
+        # `海南` 同时是省短名 —— 用"短名在省集合里"判就会把它当成海南省。
+        if kind == GEO_KIND_PROVINCE and text in PROVINCE_ALIASES:
+            return PROVINCE_ALIASES[text]
+        if kind == GEO_KIND_CITY and text in CITY_ALIASES:
+            return CITY_ALIASES[text]
+
+    if kind == GEO_KIND_CITY:
+        lead = _leading_province(text)
+        if lead:
+            key, province = lead
+            rest = text[len(key) :]
+            # 省已确定 → **只在该省的城市里**找，避免撞到别省的同名/近名城市
+            city = _leading_city(rest, PROVINCE_CITIES.get(province, ()))
+            if city:
+                return city
+            if province in _MUNICIPALITY_SHORT:
+                # 直辖市：第二级就是它自己（`北京市朝阳区` → `北京`）
+                return province
+        else:
+            city = _leading_city(text)
+            if city:
+                return city
+
+        contained = _contained_city(text)
+        if contained:
+            return contained
+        return _shorten(text).strip() or None
+
+    if kind == GEO_KIND_PROVINCE:
+        # ⚠️ 保护：**本身就是一个已知城市写法**的值，绝不去剥它的省级前缀。
+        # 反例（2026-09-29 实测）：`海南藏族自治州`（青海）以省写法 `海南` 开头，
+        # 不设这道保护就会被判成海南省；`吉林市` 同理（虽结果相同）。
+        # 命中保护时退回**与不传 kind 完全相同**的行为，不做猜测。
+        if text in CITY_ALIASES and text not in PROVINCE_ALIASES:
+            return _shorten(text).strip() or None
+        lead = _leading_province(text)
+        if lead:
+            return lead[1]
+        contained = _contained_province(text)
+        if contained:
+            return contained
+        return _shorten(text).strip() or None
 
     shortened = _shorten(text).strip()
     return shortened or None
@@ -92,8 +243,8 @@ async def upsert_company(
     if clean is None:
         return None
 
-    region = normalise_geo_name(region)
-    city = normalise_geo_name(city)
+    region = normalise_geo_name(region, kind=GEO_KIND_PROVINCE)
+    city = normalise_geo_name(city, kind=GEO_KIND_CITY)
 
     company = (
         await session.execute(select(Company).where(Company.name == clean).limit(1))
@@ -144,8 +295,8 @@ async def link_job_company(
     取值策略：**非空的新值覆盖旧值**（表格是这次招聘的事实来源），空值不覆盖。
     地域同样归一化为**短名**（与下拉选项同一套写法）。
     """
-    region = normalise_geo_name(region)
-    city = normalise_geo_name(city)
+    region = normalise_geo_name(region, kind=GEO_KIND_PROVINCE)
+    city = normalise_geo_name(city, kind=GEO_KIND_CITY)
 
     link = (
         await session.execute(
@@ -268,6 +419,8 @@ def aggregate_geo_options(
 
 
 __all__ = [
+    "GEO_KIND_CITY",
+    "GEO_KIND_PROVINCE",
     "aggregate_geo_options",
     "company_job_count",
     "link_job_company",
