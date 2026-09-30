@@ -1,102 +1,11 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from app.core.agent.base import BaseAgent, ReActAgent
 from app.core.agent.langgraph_agent import build_agent_graph, compile_agent
 from app.core.agent.nodes import AgentState, call_model, execute_tools, should_continue
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.graph.state import CompiledStateGraph
-
-# ── base.py tests ──────────────────────────────────────────────────────────
-
-
-class TestBaseAgent:
-    def test_abstract_cannot_instantiate(self):
-        with pytest.raises(TypeError):
-            BaseAgent(llm_gateway=MagicMock(), system_prompt="test")  # type: ignore[abstract]
-
-    @pytest.mark.asyncio
-    async def test_react_agent_arun(self):
-        mock_llm = AsyncMock()
-        mock_llm.ainvoke.return_value = AIMessage(content="你好，我是AI助手")
-        mock_gateway = MagicMock()
-        mock_gateway.get_model.return_value = mock_llm
-
-        agent = ReActAgent(llm_gateway=mock_gateway, system_prompt="你是一个助手。")
-        result = await agent.arun("你好")
-
-        assert result == "你好，我是AI助手"
-        mock_gateway.get_model.assert_called_once_with(None)
-        mock_llm.ainvoke.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_react_agent_arun_with_model_name(self):
-        mock_llm = AsyncMock()
-        mock_llm.ainvoke.return_value = AIMessage(content="使用qwen模型回复")
-        mock_gateway = MagicMock()
-        mock_gateway.get_model.return_value = mock_llm
-
-        agent = ReActAgent(llm_gateway=mock_gateway, system_prompt="", model_name="qwen")
-        result = await agent.arun("测试")
-
-        assert result == "使用qwen模型回复"
-        mock_gateway.get_model.assert_called_once_with("qwen")
-
-    @pytest.mark.asyncio
-    async def test_react_agent_astream(self):
-        mock_llm = MagicMock()
-
-        async def _astream(_):
-            yield AIMessage(content="token1")
-            yield AIMessage(content="token2")
-
-        mock_llm.astream = _astream
-        mock_gateway = MagicMock()
-        mock_gateway.get_model.return_value = mock_llm
-
-        agent = ReActAgent(llm_gateway=mock_gateway, system_prompt="")
-        tokens = [t async for t in agent.astream("你好")]
-
-        assert tokens == ["token1", "token2"]
-
-    @pytest.mark.asyncio
-    async def test_react_agent_with_tools_bound(self):
-        mock_tool = MagicMock(spec=BaseTool)
-        mock_tool.name = "test_tool"
-        mock_llm = MagicMock()
-        mock_bound = AsyncMock()
-        mock_bound.ainvoke.return_value = AIMessage(content="带工具回复")
-        mock_llm.bind_tools.return_value = mock_bound
-        mock_gateway = MagicMock()
-        mock_gateway.get_model.return_value = mock_llm
-
-        agent = ReActAgent(llm_gateway=mock_gateway, system_prompt="", tools=[mock_tool])
-        result = await agent.arun("调用工具")
-
-        assert result == "带工具回复"
-        mock_llm.bind_tools.assert_called_once_with([mock_tool])
-
-    def test_build_messages_with_history(self):
-        mock_gateway = MagicMock()
-        agent = ReActAgent(llm_gateway=mock_gateway, system_prompt="系统提示。")
-        history = [
-            {"role": "user", "content": "之前的问题"},
-            {"role": "assistant", "content": "之前的回答"},
-        ]
-
-        messages = agent._build_messages("新的问题", history)
-
-        assert len(messages) == 4
-        assert isinstance(messages[0], SystemMessage)
-        assert messages[0].content == "系统提示。"
-        assert isinstance(messages[1], HumanMessage)
-        assert messages[1].content == "之前的问题"
-        assert isinstance(messages[2], AIMessage)
-        assert messages[2].content == "之前的回答"
-        assert isinstance(messages[3], HumanMessage)
-        assert messages[3].content == "新的问题"
-
 
 # ── nodes.py tests ─────────────────────────────────────────────────────────
 

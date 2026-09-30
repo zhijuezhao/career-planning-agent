@@ -79,7 +79,8 @@ services:
       - "8002:8001"
     volumes:
       - ./backend:/app/backend
-      - uploads:/app/uploads
+      # 2026-09-30（P8）：移除 `uploads:/app/uploads` —— 该命名卷**从未被写入过**
+      # （实测 0 文件）。上传实际落在上面那个 bind mount 内：宿主 `./backend/uploads`。
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,6 +92,6 @@ services:
 volumes:
   pgdata:
   redisdata:
-  uploads:
+  # 2026-09-30（P8）：`uploads:` 卷声明已删 —— 从未被使用，纯死重量。
   admin_frontend_dist:
   student_frontend_dist:
