@@ -14,7 +14,6 @@
         <el-table-column prop="company" label="公司" />
         <el-table-column prop="city" label="城市" />
         <el-table-column prop="industry" label="行业" />
-        <el-table-column label="状态" prop="is_active" />
       </el-table>
       <div class="pagination">
         <el-pagination v-model:current-page="query.page" :page-size="query.limit" :total="total" layout="total, prev, pager, next" @current-change="fetchData" />
@@ -34,7 +33,6 @@ interface RawDataItem {
   company: string | null
   city: string | null
   industry: string | null
-  is_active: boolean
 }
 
 const loading = ref(false)

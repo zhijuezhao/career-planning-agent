@@ -302,21 +302,21 @@ async def node_persist(state: JobImportState) -> dict:
     """第 7 阶段（B2-2）：把通过质检的行落库 —— job_raw_data + job_profiles(+companies)。
 
     单行失败只计入 `persist_stats.failed`，不影响整单（导入是批量场景）。
-    原先 S7-3 只跑到 portrait 不落库，行级统计见 `data_import_jobs.stats.persist`。
+    行级统计见 `data_import_jobs.stats.persist`。
 
-    **C 层（2026-09-26）**：被判 D 的行**也写入 `job_raw_data`**（`source=import:rejected`、
-    `is_active=False`），只是不生成画像 —— 此前 D 级行完全不落库，数据丢了只能重新上传。
+    **2026-09-30 用户要求：原始数据里不存不合格岗位** —— 质检 D 级行**不写**
+    `job_raw_data`（此前 C 层 2026-09-26 会把 D 级行以 `source=import:rejected`、
+    `is_active=False` 归档）。D 级行的原因仍由 `_import_runner` 写进工单 errors
+    （最多 20 条），保证"为什么被拒"依旧可见。
     """
     from app.domain.services.job_persist_service import persist_import_rows
 
     rows = merge_rows_for_persist(state)
-    rejected = [r for r in (state.get("rejected_rows") or []) if isinstance(r, dict)]
-    if not rows and not rejected:
-        logger.info("Import: nothing to persist | passed=0 rejected=0")
+    if not rows:
+        logger.info("Import: nothing to persist | passed=0")
         return {
             "persist_stats": {
                 "raw_written": 0,
-                "raw_written_rejected": 0,
                 "profiles_new": 0,
                 "profiles_updated": 0,
                 "failed": 0,
@@ -326,16 +326,15 @@ async def node_persist(state: JobImportState) -> dict:
 
     async with async_session_factory() as session:
         try:
-            stats = await persist_import_rows(session, rows, rejected_rows=rejected)
+            stats = await persist_import_rows(session, rows)
             await session.commit()
         except Exception:
             await session.rollback()
             raise
 
     logger.info(
-        "Import: persisted | raw={} rejected_raw={} new={} updated={} failed={}",
+        "Import: persisted | raw={} new={} updated={} failed={}",
         stats["raw_written"],
-        stats.get("raw_written_rejected", 0),
         stats["profiles_new"],
         stats["profiles_updated"],
         stats["failed"],

@@ -372,26 +372,10 @@ async def _check_persisted(c: Checker, detail: dict) -> None:
     from sqlalchemy import text
 
     async with async_session_factory() as session:
-        # 先看原始行（**无论判 D 与否都会写入**），这是 LLM 无关的稳定证据
-        raw = (
-            await session.execute(
-                text(
-                    "SELECT company, city, description, requirements, source FROM job_raw_data "
-                    "WHERE title = :t ORDER BY id DESC"
-                ),
-                {"t": TITLE_A},
-            )
-        ).first()
-        c.check("富化后的行已落原始表", raw is not None)
-        if raw is not None:
-            raw_company, raw_city, raw_desc, raw_req, raw_source = raw
-            c.check(
-                "链接里的描述已落进原始行",
-                bool(raw_desc) and len(raw_desc) > 100,
-                f"description_chars={len(raw_desc) if raw_desc else 0}",
-            )
-            c.check("链接里的公司已落进原始行", bool(raw_company), f"raw.company={raw_company}")
-
+        # ⚠️ 2026-09-30 用户要求：**不合格（质检 D 级）岗位不进原始数据表**。
+        # 于是"raw 里有没有这一行"在**有画像 / 无画像**两种情况下**期望正好相反** ——
+        # 必须分别断言，不能因为"找不到行"就静默跳过（那会把新规则漏测掉）。
+        # 所以先查画像（它决定这行有没有通过质检），再查原始行。
         profile = (
             await session.execute(
                 text(
@@ -402,16 +386,43 @@ async def _check_persisted(c: Checker, detail: dict) -> None:
                 {"t": TITLE_A},
             )
         ).first()
+
+        raw = (
+            await session.execute(
+                text(
+                    "SELECT company, city, description, requirements, source FROM job_raw_data "
+                    "WHERE title = :t ORDER BY id DESC"
+                ),
+                {"t": TITLE_A},
+            )
+        ).first()
+
         if profile is None:
+            # 判 D（不合格）：**新规则下这一行不该出现在原始数据表里** —— 正向断言它
             d_reasons = [e for e in (detail.get("errors") or []) if TITLE_A[:12] in str(e)]
+            c.check(
+                "被判 D 的不合格岗位**没有**进原始数据表（2026-09-30 用户要求）",
+                raw is None,
+                f"raw={'存在 → 旧行为！' if raw is not None else '不存在'}；"
+                f"原因={d_reasons or detail.get('errors')}",
+            )
             c.note(
-                "该行被质检判 D → 不生成岗位画像，画像级断言本轮跳过："
-                f"{d_reasons or detail.get('errors')}；"
+                "该行被质检判 D → 不生成岗位画像、**也不写原始数据表**，画像级断言本轮跳过；"
                 "（判 D 属质检口径，不是富化缺陷；'enrich_stats 落 job_profiles' 由单测 "
                 "test_link_enrich_pipeline.TestPersistWritesEnrichColumns 覆盖）"
             )
             return
+
+        # 通过质检（A/B/C）：原始行**应该在**，且链接富化的字段要落进去
+        c.check("通过质检的行已落原始表", raw is not None)
         c.check("链接富化的岗位已落库", True)
+        raw_company, raw_city, raw_desc, raw_req, raw_source = raw
+        c.check(
+            "链接里的描述已落进原始行",
+            bool(raw_desc) and len(raw_desc) > 100,
+            f"description_chars={len(raw_desc) if raw_desc else 0}",
+        )
+        c.check("链接里的公司已落进原始行", bool(raw_company), f"raw.company={raw_company}")
 
         pid, source_url, enrich_stats, salary_range, industry, level, edu, exp = profile
         c.check("job_profiles.source_url 已写入", bool(source_url), f"source_url={source_url}")
@@ -436,7 +447,7 @@ async def _check_persisted(c: Checker, detail: dict) -> None:
                 {"i": pid},
             )
         ).first()
-        # raw 行已在函数开头查过（判 D 与否都写），这里直接用
+        # raw 行已在上面查过（走到这里说明画像存在）—— 直接用它的字段
         link_city, link_region, link_salary = link if link else (None, None, None)
         company_name = company[0] if company else None
 

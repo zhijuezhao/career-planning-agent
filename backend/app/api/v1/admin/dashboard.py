@@ -125,24 +125,21 @@ async def quality_distribution(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get job data quality distribution."""
-    # Count active vs inactive raw data
+    """原始数据的质量分布。
+
+    ⚠️ **2026-09-30 起只剩"活跃"一种**：质检 D 级（不合格）岗位**不再写入**
+    `job_raw_data`（用户要求"原始数据里不存不合格岗位"，见
+    `import_pipeline.node_persist` / `job_persist_service.persist_import_rows`），
+    所以 `is_active=False` 的行**不再可能产生** —— 原来的「非活跃」那一项随之移除
+    （它已经恒为 0，留着只会让人误以为"还有归档数据"）。
+    """
     active_count = (
         await db.execute(
             select(func.count()).select_from(JobRawData).where(JobRawData.is_active.is_(True))
         )
     ).scalar() or 0
 
-    inactive_count = (
-        await db.execute(
-            select(func.count()).select_from(JobRawData).where(JobRawData.is_active.is_(False))
-        )
-    ).scalar() or 0
-
-    return [
-        QualityDistribution(grade="活跃", count=active_count),
-        QualityDistribution(grade="非活跃", count=inactive_count),
-    ]
+    return [QualityDistribution(grade="活跃", count=active_count)]
 
 
 @router.get("/snapshot-stats", response_model=SnapshotStats)

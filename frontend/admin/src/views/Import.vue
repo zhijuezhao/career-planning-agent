@@ -47,7 +47,6 @@ interface ImportSchema {
 /** 落库统计（`job_persist_service.persist_import_rows`） */
 interface ImportPersistStats {
   raw_written?: number
-  raw_written_rejected?: number
   profiles_new?: number
   profiles_updated?: number
   failed?: number
@@ -226,11 +225,14 @@ const statsTags = computed<DetailTag[]>(() => {
   tags.push({ text: `入库 ${persist.raw_written ?? 0} 行`, type: 'success' })
   tags.push({ text: `新建 ${persist.profiles_new ?? 0}`, type: 'info' })
   tags.push({ text: `更新 ${persist.profiles_updated ?? 0}`, type: 'info' })
-  if ((persist.raw_written_rejected ?? 0) > 0) {
-    tags.push({ text: `D 级归档 ${persist.raw_written_rejected} 行`, type: 'warning' })
-  }
   if ((persist.failed ?? 0) > 0) {
     tags.push({ text: `失败 ${persist.failed} 行`, type: 'danger' })
+  }
+  // 2026-09-30：D 级行不再归档进 job_raw_data（后端不再产出 raw_written_rejected），
+  // 未入库的淘汰数直接用工单的 error_count 表达。
+  const rejectedCount = job.error_count ?? 0
+  if (rejectedCount > 0) {
+    tags.push({ text: `淘汰 ${rejectedCount} 行（未入库）`, type: 'warning' })
   }
   return tags
 })
@@ -258,7 +260,7 @@ const statsMarkdown = computed(() => {
       '',
       `**落库**：入库 ${persist.raw_written ?? 0} 行` +
         `（新建 ${persist.profiles_new ?? 0} / 更新 ${persist.profiles_updated ?? 0}），` +
-        `D 级原始行归档 ${persist.raw_written_rejected ?? 0} 行，失败 ${persist.failed ?? 0} 行`,
+        `淘汰 ${statsJob.value?.error_count ?? 0} 行（未入库），失败 ${persist.failed ?? 0} 行`,
     )
   }
   return lines.join('\n')

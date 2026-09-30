@@ -176,6 +176,13 @@ class JobProfileListResponse(BaseModel):
 # ── JobRawData Admin Schemas ────────────────────────────────────────────────
 
 class JobRawDataResponse(BaseModel):
+    """原始数据行。
+
+    ⚠️ 2026-09-30 起**不再下发 `is_active`**：质检 D 级（不合格）行不再写入本表，
+    表里不会再出现 `is_active=False` 的行（用户要求"原始数据里不存不合格岗位"），
+    该字段对前端已无意义。
+    """
+
     id: int
     title: str
     company: str | None
@@ -185,7 +192,6 @@ class JobRawDataResponse(BaseModel):
     description: str | None
     requirements: str | None
     source: str | None
-    is_active: bool
     expire_at: datetime | None
     created_at: datetime
 

@@ -8,7 +8,7 @@ from app.api.v1.admin.auth import require_admin
 from app.domain.models.job import JobRawData
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
-from app.schemas.admin import JobRawDataResponse, JobRawDataListResponse
+from app.schemas.admin import JobRawDataListResponse, JobRawDataResponse
 
 router = APIRouter()
 
@@ -19,11 +19,15 @@ async def list_raw_data(
     limit: int = Query(20, ge=1, le=100),
     industry: str | None = None,
     city: str | None = None,
-    is_active: bool | None = None,
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List raw job data with optional filtering."""
+    """List raw job data with optional filtering.
+
+    ⚠️ **2026-09-30 起不再有 `is_active` 过滤**：质检 D 级（不合格）行不再写入
+    `job_raw_data`，表里不会再出现 `is_active=False` 的行（用户要求"原始数据里
+    不存不合格岗位"）。原来的过滤参数已无意义，随之移除。
+    """
     query = select(JobRawData)
     count_query = select(func.count()).select_from(JobRawData)
 
@@ -33,9 +37,6 @@ async def list_raw_data(
     if city:
         query = query.where(JobRawData.city == city)
         count_query = count_query.where(JobRawData.city == city)
-    if is_active is not None:
-        query = query.where(JobRawData.is_active == is_active)
-        count_query = count_query.where(JobRawData.is_active == is_active)
 
     total = (await db.execute(count_query)).scalar() or 0
 
