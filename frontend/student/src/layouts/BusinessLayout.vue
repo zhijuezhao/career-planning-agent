@@ -98,7 +98,6 @@ onMounted(async () => {
               <el-dropdown-item disabled>
                 {{ userStore.userInfo?.username || '未登录' }}
               </el-dropdown-item>
-              <el-dropdown-item divided @click="goToGuide()">重新引导</el-dropdown-item>
               <el-dropdown-item @click="userStore.logout()">退出登录</el-dropdown-item>
             </el-dropdown-menu>
           </template>

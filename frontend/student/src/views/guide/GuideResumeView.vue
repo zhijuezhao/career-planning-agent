@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { profileApi, type UploadParseResult } from '@/api/profile'
 import { useJourneyStore } from '@/stores/journey'
@@ -51,6 +51,47 @@ async function onFile(file: { raw: File }): Promise<void> {
     uploading.value = false
   }
 }
+
+/**
+ * 「已上传过？→进入业务大厅」
+ * 先向后端确认旅程状态：无画像（snapshot_id 为 null = 新用户）→ 弹窗二选一；
+ * 已有画像 → 正常进入业务大厅。
+ * 弹窗「上传」：停留在本页继续上传，不做任何跳转/刷新（保留当前体验）；
+ * 弹窗「跳过」：直接进入业务大厅主页（/），不进行报错处理。
+ * 状态获取失败（离线/异常）：不阻塞、不报错，放行进业务大厅。
+ */
+async function goBusiness(): Promise<void> {
+  try {
+    await journey.fetchStatus()
+  } catch {
+    router.push('/')
+    return
+  }
+
+  // 已有快照（生成过画像）→ 正常进入业务大厅
+  if (journey.snapshotId !== null) {
+    router.push('/')
+    return
+  }
+
+  // 新用户（还没有生成画像）→ 弹窗二选一
+  try {
+    await ElMessageBox.confirm(
+      '系统检查到您还没有生成画像，是先上传还是跳过',
+      '提示',
+      {
+        confirmButtonText: '上传',
+        cancelButtonText: '跳过',
+        type: 'warning',
+        distinguishCancelAndClose: true,
+      },
+    )
+    // 点击「上传」：留在本页（/guide/resume）继续上传，路由导向不变、无刷新
+  } catch (action) {
+    // 点击「跳过」→ 进入业务大厅主页；右上角关闭 → 同样留在本页
+    if (action === 'cancel') router.push('/')
+  }
+}
 </script>
 
 <template>
@@ -81,7 +122,7 @@ async function onFile(file: { raw: File }): Promise<void> {
 
     <p class="uploaded-hint">
       已上传过？
-      <router-link to="/guide/parse">直接查看我的画像</router-link>
+      <a href="/" class="business-link" @click.prevent="goBusiness">进入业务大厅</a>
     </p>
   </div>
 </template>
