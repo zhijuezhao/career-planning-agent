@@ -29,6 +29,8 @@ class JobImportState(TypedDict, total=False):
 
     # Stage 3: Dedup
     deduped_rows: list[dict]
+    #: B2（2026-10-03）：逐级删除数 + 「单级删除比例过高」告警，供 `_import_runner` 落库
+    dedup_stats: dict
 
     # Stage 3.5: Link Enrich（B3-1，零 LLM）
     #: 富化后的行（字段已按「表格值优先」补齐）。**放质检之前**：链接补出来的
@@ -111,13 +113,27 @@ async def node_dedup(state: JobImportState) -> dict:
     result = await deduplicate_jobs.ainvoke({"rows": state["cleaned_rows"]})
     deduped = result.get("deduped_rows", [])
     logger.info(
-        "Import: dedup completed | exact={} title_company={} fuzzy={} remaining={}",
+        "Import: dedup completed | identity={} title_company={} fuzzy={} remaining={}",
         result.get("exact_dedup_count", 0),
         result.get("title_company_dedup_count", 0),
         result.get("fuzzy_dedup_count", 0),
         len(deduped),
     )
-    return {"deduped_rows": deduped, "status": "deduped"}
+    # B2 护栏可见化：把逐级删除数与告警带回 state，供 `_import_runner` 落库。
+    # 只写日志的话，管理员在工单上仍然看不到"这次删了很多"（事故当年级联删 99% 却报 completed）。
+    return {
+        "deduped_rows": deduped,
+        "dedup_stats": {
+            "input": len(state["cleaned_rows"]),
+            "kept": len(deduped),
+            "identity_removed": int(result.get("exact_dedup_count") or 0),
+            "title_company_removed": int(result.get("title_company_dedup_count") or 0),
+            "fuzzy_removed": int(result.get("fuzzy_dedup_count") or 0),
+            "identity_count": int(result.get("identity_count") or 0),
+            "alerts": list(result.get("dedup_alerts") or []),
+        },
+        "status": "deduped",
+    }
 
 
 async def node_link_enrich(state: JobImportState) -> dict:

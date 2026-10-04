@@ -8,7 +8,9 @@
       "同名被多家公司招" = **1 条岗位 + N 条关联**（不再是 P2 的 N 条岗位）；
       一次招聘自带的所在地/薪资/链接落在关联行上；`job_profiles.company_id` 不再写入；
     * **任务 3（2026-09-27）单键 + 删列**：`job_profiles.company_id`（含 FK/索引）确实不存在，
-      唯一键是 `uq_job_profiles_title_key (title_key)`，"删公司撞唯一索引 → 500"结构上消失；
+      "删公司撞唯一索引 → 500"结构上消失；
+    * **B4（2026-10-03）唯一键加等级**：`uq_job_profiles_title_level (title_key, level)`，
+      `level` **NOT NULL**（唯一索引里 NULL 互不相等，可空等于挡不住重复）；
     * `persist_import_rows` 的统计与**行级容错**（一行没 title 不该拖垮其他行）。
 
 所有用例只创建 `b22_<ts>_*` 前缀的数据，结束时按前缀 + 自增 id 精确清理。
@@ -454,10 +456,12 @@ class TestJobCompanyLinks:
             ) == 1
 
     async def test_unique_index_blocks_manual_duplicate(self):
-        """**岗位名唯一**由 DB 唯一索引兜底 —— 绕过服务层直插也会被拦。
+        """**`(岗位名, 等级)` 唯一**由 DB 唯一索引兜底 —— 绕过服务层直插也会被拦。
 
-        任务 3（2026-09-27）起索引是 **`uq_job_profiles_title_key (title_key)`** 单键
-        （P2 的 `(title_key, company_id) NULLS NOT DISTINCT` 随 `company_id` 列一起删除）。
+        任务 3（2026-09-27）起索引是 `uq_job_profiles_title_key (title_key)` 单键
+        （P2 的 `(title_key, company_id) NULLS NOT DISTINCT` 随 `company_id` 列一起删除）；
+        **B4（2026-10-03）起换成 `uq_job_profiles_title_level (title_key, level)`** ——
+        同名不同等级是**两条正常画像**，只有同名**同等级**才算重复。
         """
         title = _title("唯一索引岗位")
         async with test_session_factory() as session:
@@ -484,6 +488,57 @@ class TestJobCompanyLinks:
             )
             await session.commit()
         assert key
+
+    async def test_same_title_different_level_are_two_profiles(self):
+        """B4（2026-10-03）：同名**不同等级** = 两条画像（这正是加这一维的目的）。
+
+        用户要求"综合出岗位信息后按规则划分出初级/中级/高级岗位"——
+        单键 `(title_key)` 时代第二份会撞唯一键被当成 update 覆盖。
+        """
+        title = _title("分等级岗位")
+        company = _company("等级公司")
+
+        async with test_session_factory() as session:
+            basic, created_basic = await upsert_job_profile(
+                session, {"title": title, "level": "初级", "company": company}
+            )
+            senior, created_senior = await upsert_job_profile(
+                session, {"title": title, "level": "高级", "company": company}
+            )
+            await session.commit()
+
+            assert created_basic is True and created_senior is True
+            assert basic.id != senior.id
+            assert basic.title_key == senior.title_key, "归一化后的岗位名相同"
+            assert {basic.level, senior.level} == {"初级", "高级"}
+            basic_id = basic.id
+
+        # 再 upsert 同名**同等级** → 命中已有那条，不新建
+        async with test_session_factory() as session:
+            again, created = await upsert_job_profile(
+                session, {"title": title, "level": "初级", "company": company}
+            )
+            await session.commit()
+            assert created is False
+            assert again.id == basic_id
+
+    async def test_unknown_level_is_normalised_to_unlimited(self):
+        """自由文本等级必须收敛到 4 个档位之一，否则每种写法都会各建一条画像。"""
+        title = _title("等级收敛岗位")
+        async with test_session_factory() as session:
+            profile, _ = await upsert_job_profile(
+                session, {"title": title, "level": "3-5年经验", "company": _company("等级公司")}
+            )
+            await session.commit()
+            assert profile.level == "不限"
+
+    async def test_level_defaults_to_unlimited(self):
+        """不传 level → 默认「不限」（列 NOT NULL + server_default）。"""
+        title = _title("默认等级岗位")
+        async with test_session_factory() as session:
+            profile, _ = await upsert_job_profile(session, {"title": title})
+            await session.commit()
+            assert profile.level == "不限"
 
     async def test_link_is_idempotent_and_counts_hits(self):
         title = _title("重复导入")
@@ -582,12 +637,44 @@ class TestTask3SingleKeySchema:
                 text(
                     "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
                     "WHERE n.nspname = 'public' AND c.relkind = 'i' "
-                    "AND c.relname IN ('ix_job_profiles_company_id', 'uq_job_profiles_title_company')"
+                    "AND c.relname IN ('ix_job_profiles_company_id', "
+                    "'uq_job_profiles_title_company', 'uq_job_profiles_title_key')"
                 )
             )
-            assert stale_index_count == 0, "P2 的旧索引应已全部删除"
+            assert stale_index_count == 0, "P2 / 任务3 的旧索引应已全部删除"
 
-    async def test_unique_key_is_title_key_single_column(self):
+    async def test_unique_key_is_title_key_plus_level(self):
+        """B4（2026-10-03）：岗位唯一键变成 `(title_key, level)` —— 「岗位名 × 等级」。
+
+        为什么必须带上 level：用户要求"综合出岗位信息后按规则划分出初级/中级/高级"，
+        三份画像都要有位置；单键 `(title_key)` 下第二份会撞唯一键被当成 update 覆盖。
+
+        ⚠️ 同时断言 `level` 是 **NOT NULL**：PostgreSQL 唯一索引里 NULL 互不相等，
+        可空的话两条 `level=NULL` 的同名岗位不会冲突 → 又不分等级了。
+        """
+        async with test_session_factory() as session:
+            definition = await session.scalar(
+                text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE schemaname = 'public' AND indexname = 'uq_job_profiles_title_level'"
+                )
+            )
+            level_nullable = await session.scalar(
+                text(
+                    "SELECT is_nullable FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'job_profiles' "
+                    "AND column_name = 'level'"
+                )
+            )
+
+        assert definition is not None, "B4 的唯一索引 uq_job_profiles_title_level 不存在"
+        assert "UNIQUE" in definition.upper()
+        assert definition.rstrip().endswith("(title_key, level)"), definition
+        assert "company_id" not in definition
+        assert level_nullable == "NO", "level 必须 NOT NULL（否则唯一索引挡不住重复）"
+
+    async def test_old_single_key_index_is_gone(self):
+        """旧单键索引必须删掉：留着它会把"同名不同等级"的第二条画像顶回去。"""
         async with test_session_factory() as session:
             definition = await session.scalar(
                 text(
@@ -595,10 +682,7 @@ class TestTask3SingleKeySchema:
                     "WHERE schemaname = 'public' AND indexname = 'uq_job_profiles_title_key'"
                 )
             )
-        assert definition is not None, "任务 3 的单键唯一索引 uq_job_profiles_title_key 不存在"
-        assert "UNIQUE" in definition.upper()
-        assert definition.rstrip().endswith("(title_key)"), definition
-        assert "company_id" not in definition
+        assert definition is None, "uq_job_profiles_title_key 应已被 (title_key, level) 取代"
 
     async def test_deleting_second_company_does_not_raise(self):
         """P2 隐患回归：两家公司各有同名岗位 → 删第二家**不再**撞唯一索引。

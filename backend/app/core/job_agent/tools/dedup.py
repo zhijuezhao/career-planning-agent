@@ -5,7 +5,12 @@ from difflib import SequenceMatcher
 from langchain_core.tools import tool
 from loguru import logger
 
-from app.core.dedup_keys import job_dedup_key, normalise_company_name, normalise_title
+from app.core.dedup_keys import (
+    job_dedup_key,
+    normalise_company_name,
+    normalise_source_url,
+    normalise_title,
+)
 
 
 def _normalise(text: object) -> str:
@@ -26,110 +31,89 @@ def _similar(a: str, b: str) -> float:
     return SequenceMatcher(None, _normalise(a), _normalise(b)).ratio()
 
 
-def _exact_dedup(rows: list[dict], code_field: str = "code") -> tuple[list[dict], int]:
-    """Remove exact duplicates by job code field.
+def _identity_key(
+    row: dict,
+    code_field: str = "code",
+    url_field: str = "source_url",
+) -> tuple[str, str] | None:
+    """每条招聘的**唯一标识**：`("code", 岗位编码)` 优先，其次 `("url", 去查询串的链接)`。
 
-    Returns (deduped rows, number of duplicates removed).
+    都没有才返回 ``None``（该行将回落到「(岗位名, 公司) + 模糊」两级去重）。
+
+    为什么优先级是「编码 → 链接」（用户 2026-10-03 拍板）：
+    岗位编码是本表自带的稳定主键（实测 524 行里 487 个唯一值，与链接**严格 1:1**）；
+    链接虽然也能唯一标识，但带导出会话参数（见 `normalise_source_url`），
+    且更长短更易变，所以只作次选。
     """
-    seen_codes: set[str] = set()
-    deduped: list[dict] = []
-    removed = 0
+    code = str(row.get(code_field) or "").strip()
+    if code and code not in ("None", "nan"):
+        return ("code", code)
 
-    for row in rows:
-        code = str(row.get(code_field, "")).strip()
-        if code and code not in ("None", "nan", ""):
-            if code in seen_codes:
-                removed += 1
-                continue
-            seen_codes.add(code)
-        deduped.append(row)
+    url = normalise_source_url(row.get(url_field))
+    if url:
+        return ("url", url)
 
-    return deduped, removed
+    return None
 
 
-def _exact_dedup_by_title_company(
-    rows: list[dict],
-    company_field: str = "company",
-    title_field: str = "title",
-) -> tuple[list[dict], int]:
-    """按 `(归一化岗位名, 归一化公司)` 精确去重（P2，0 token、确定性优先）。
+def _is_fuzzy_duplicate(
+    row: dict,
+    candidates: list[dict],
+    threshold: float,
+    company_field: str,
+    title_field: str,
+    city_field: str,
+) -> bool:
+    """`row` 是否与 `candidates` 里某一行「同公司 + 近似岗位名」（P2 口径）。
 
-    这是**文件内**去重（"同一份表里两行是否重复"），不是落库唯一键 —— 落库唯一键从
-    2026-09-27 任务 3 起只有岗位名（`uq_job_profiles_title_key`）。所以：
-    "同岗位同名公司"是重复行；"同岗位不同公司"**必须保留**（两条在招关联）。
-    公司为空的行按"未知公司"处理 —— 与已知公司**不**视为同一行，
-    避免把"某公司的 Java 岗"和"没写公司的 Java 岗"提前合并掉。
+    规则（与旧实现的差别写在下面，只有这一处实现，避免逻辑漂移）：
+
+    * **公司不同 → 直接不是同一个岗位**（新粒度下是两条画像）；
+    * **城市「两边都有且不同」才否决**：旧实现要求城市完全相等，于是一张只有部分行
+      带城市的表会出现"同公司同名、一个有城市一个没有"被判成两个岗位；
+    * **公司只有一边有时不否决**（"未知"不等于"另一家"）。
     """
-    seen: set[tuple[str, str]] = set()
-    deduped: list[dict] = []
-    removed = 0
+    row_company = normalise_company_name(row.get(company_field)) or ""
+    row_title = normalise_title(row.get(title_field))
+    row_city = _normalise(row.get(city_field))
 
-    for row in rows:
-        key = job_dedup_key(row.get(title_field), row.get(company_field))
-        if not key[0]:  # 没有岗位名：交给后面的清洗/质检去管，不在这里吞掉
-            deduped.append(row)
+    for existing in candidates:
+        existing_company = normalise_company_name(existing.get(company_field)) or ""
+        existing_title = normalise_title(existing.get(title_field))
+        existing_city = _normalise(existing.get(city_field))
+
+        # 两边都写了公司且不同 → 不是同一个岗位（新粒度：同岗不同公司保留两条）
+        if row_company and existing_company and row_company != existing_company:
             continue
-        if key in seen:
-            removed += 1
+
+        # 两边都写了城市且不同 → 不是同一个岗位；只有一边有城市则不否决
+        if row_city and existing_city and row_city != existing_city:
             continue
-        seen.add(key)
-        deduped.append(row)
 
-    return deduped, removed
+        if row_title and existing_title and _similar(row_title, existing_title) >= threshold:
+            return True
+
+    return False
 
 
-def _fuzzy_dedup(
-    rows: list[dict],
-    threshold: float = 0.85,
-    company_field: str = "company",
-    title_field: str = "title",
-    city_field: str = "city",
-) -> tuple[list[dict], int]:
-    """按"同公司内近似岗位名"模糊去重（P2 调整）。
+#: 单阶段删除比例超过这个值就在结果里报「告警」（0.5 = 50%）。
+#
+# 为什么需要（2026-10-03）：真实事故里 `(岗位名, 公司)` 一级把 100 行删成 1 行
+# （删掉 99%），工单却报 `completed` + `success_count=1`，管理员**看不到任何异常**。
+# 护栏不阻止删除（有些表确实几乎全重复），但必须让"删了很多"这件事显式可见。
+_MAX_STAGE_REMOVAL_RATIO = 0.5
 
-    与旧实现的区别（旧口径是 §15 之前的"公司+岗位+城市"）：
 
-    * **公司不同 → 直接不是同一个岗位**（新粒度下是两条画像），旧实现只在
-      "两边公司都非空且不同"时跳过，这里保持一致；
-    * **城市改成"两边都有且不同才否决"**：旧实现要求城市完全相等，
-      一旦某张表只有部分行带城市，就会出现"同公司同名、一个有城市一个没有"被判成两个岗位；
-    * 公司只有一边有时**不**否决（"未知"不等于"另一家"）。
-    """
-    deduped: list[dict] = []
-    removed = 0
-
-    for row in rows:
-        is_dup = False
-        row_company = normalise_company_name(row.get(company_field)) or ""
-        row_title = normalise_title(row.get(title_field))
-        row_city = _normalise(row.get(city_field))
-
-        for existing in deduped:
-            existing_company = normalise_company_name(existing.get(company_field)) or ""
-            existing_title = normalise_title(existing.get(title_field))
-            existing_city = _normalise(existing.get(city_field))
-
-            # 两边都写了公司且不同 → 不是同一个岗位（新粒度：同岗不同公司保留两条）
-            if row_company and existing_company and row_company != existing_company:
-                continue
-
-            # 两边都写了城市且不同 → 不是同一个岗位；只有一边有城市则不否决
-            if row_city and existing_city and row_city != existing_city:
-                continue
-
-            # Similar title
-            if row_title and existing_title:
-                similarity = _similar(row_title, existing_title)
-                if similarity >= threshold:
-                    is_dup = True
-                    break
-
-        if is_dup:
-            removed += 1
-        else:
-            deduped.append(row)
-
-    return deduped, removed
+def _removal_alerts(stages: list[tuple[str, int, int]]) -> list[str]:
+    """把「某阶段删得太多」折算成可读告警（``(阶段名, 输入行数, 删除行数)``）。"""
+    alerts: list[str] = []
+    for name, before, removed in stages:
+        if before > 0 and removed / before > _MAX_STAGE_REMOVAL_RATIO:
+            alerts.append(
+                f"{name} 阶段删除 {removed}/{before} 行"
+                f"（>{_MAX_STAGE_REMOVAL_RATIO:.0%}），请确认表内是否确实大量重复"
+            )
+    return alerts
 
 
 @tool
@@ -140,26 +124,39 @@ async def deduplicate_jobs(
     company_field: str = "company",
     title_field: str = "title",
     city_field: str = "city",
+    url_field: str = "source_url",
 ) -> dict:
     """Remove duplicate job records.
 
-    Performs three-stage deduplication:
-    1. Exact dedup by job code (e.g. 岗位编码) — removes rows with the same code.
-    2. Exact dedup by `(岗位名, 公司)`（P2 起与落库粒度一致）—— 归一化后完全相同即重复。
-    3. Fuzzy dedup within the same company — titles similar above the threshold.
+    **标识优先**的三级去重（2026-10-03 用户拍板，改造自旧的三阶段实现）：
+
+    1. **按唯一标识去重**：`岗位编码`（`code_field`）→ `岗位来源地址`（`url_field`，
+       会去掉查询串）。有标识的行到此为止 —— **跳过**后面两级。
+    2. **`(岗位名, 公司)` 精确去重**：只对**没有唯一标识**的行生效。
+    3. **同公司内近似岗位名模糊去重**：同样只对没有唯一标识的行生效。
+
+    为什么改成这样（真实事故）：用户的 524 行表有 `岗位编码`（487 个唯一值），
+    但旧实现第 1 级只按 `code` 去重（524→487 正确），**紧接着第 2 级又按
+    `(岗位名, 公司)` 把 487 行并成 384 行** —— 被并掉的 103 行编码各不相同、
+    城市/日期也不同（如美团把「APP推广」投在 8 个城市），是**独立的真实招聘**。
+    更极端的一次：4366 行、`岗位名称` 只有 9 个类别且无公司列 → 第 2 级把 100 行
+    并成 **1 行**，工单却报 `completed`。
 
     Args:
         rows: List of job data dicts.
-        code_field: Field name for exact dedup (default "code").
-        fuzzy_threshold: Similarity threshold for fuzzy title matching (0.0-1.0, default 0.85).
-        company_field: Field name for company (default "company").
-        title_field: Field name for job title (default "title").
-        city_field: Field name for city (default "city").
+        code_field: 唯一编码列（默认 `code`）。
+        fuzzy_threshold: 模糊去重阈值（0.0-1.0，默认 0.85）。
+        company_field: 公司列（默认 `company`）。
+        title_field: 岗位名列（默认 `title`）。
+        city_field: 城市列（默认 `city`）。
+        url_field: 来源链接列（默认 `source_url`）。
 
     Returns:
         Dict with total (int), deduped_rows (list[dict]),
-        exact_dedup_count (int), title_company_dedup_count (int),
-        and fuzzy_dedup_count (int).
+        exact_dedup_count / title_company_dedup_count / fuzzy_dedup_count (int,
+        **键名保持兼容**，语义见下), identity_count (有唯一标识的行数),
+        unidentified_count (无标识、走了第 2/3 级的行数),
+        以及 dedup_alerts (list[str]，单阶段删除比例过高时的告警)。
     """
     logger.info(
         "Deduplicating jobs | rows={} | fuzzy_threshold={}",
@@ -167,40 +164,79 @@ async def deduplicate_jobs(
         fuzzy_threshold,
     )
 
-    # Stage 1: exact dedup by job code
-    after_exact, exact_removed = _exact_dedup(rows, code_field)
-    logger.info("Exact dedup | before={} | after={} | removed={}", len(rows), len(after_exact), exact_removed)
+    deduped: list[dict] = []
+    seen_identity: set[tuple[str, str]] = set()
+    seen_title_company: set[tuple[str, str]] = set()
+    #: 无标识且已保留的行 —— 供模糊去重比对（有标识的行不参与模糊比对）
+    unidentified_kept: list[dict] = []
 
-    # Stage 2: exact dedup by (title, company) —— P2：与落库键同粒度
-    after_key, key_removed = _exact_dedup_by_title_company(
-        after_exact, company_field=company_field, title_field=title_field
+    identity_removed = 0
+    key_removed = 0
+    fuzzy_removed = 0
+    identity_count = 0
+
+    for row in rows:
+        identity = _identity_key(row, code_field, url_field)
+
+        # ── 第 1 级：唯一标识（命中即跳过后面两级）─────────────────────────
+        if identity is not None:
+            identity_count += 1
+            if identity in seen_identity:
+                identity_removed += 1
+                continue
+            seen_identity.add(identity)
+            deduped.append(row)
+            continue
+
+        # ── 第 2 级：(岗位名, 公司) 精确（仅无标识行）──────────────────────
+        key = job_dedup_key(row.get(title_field), row.get(company_field))
+        if key[0]:  # 没有岗位名：不在这里吞掉，交给清洗/质检去管
+            if key in seen_title_company:
+                key_removed += 1
+                continue
+            seen_title_company.add(key)
+
+        # ── 第 3 级：同公司内近似岗位名（仅无标识行）───────────────────────
+        if _is_fuzzy_duplicate(
+            row, unidentified_kept, fuzzy_threshold, company_field, title_field, city_field
+        ):
+            fuzzy_removed += 1
+            continue
+
+        unidentified_kept.append(row)
+        deduped.append(row)
+
+    logger.info(
+        "Identity dedup | with_identity={} | removed={}",
+        identity_count,
+        identity_removed,
     )
     logger.info(
-        "Title+company dedup | before={} | after={} | removed={}",
-        len(after_exact),
-        len(after_key),
+        "Title+company/fuzzy dedup (无标识行) | unidentified={} | tc_removed={} | fuzzy_removed={}",
+        len(unidentified_kept) + key_removed + fuzzy_removed,
         key_removed,
-    )
-
-    # Stage 3: fuzzy dedup（同公司内近似岗位名）
-    after_fuzzy, fuzzy_removed = _fuzzy_dedup(
-        after_key,
-        threshold=fuzzy_threshold,
-        company_field=company_field,
-        title_field=title_field,
-        city_field=city_field,
-    )
-    logger.info(
-        "Fuzzy dedup | before={} | after={} | removed={}",
-        len(after_key),
-        len(after_fuzzy),
         fuzzy_removed,
     )
 
+    alerts = _removal_alerts(
+        [
+            ("按唯一标识去重", len(rows), identity_removed),
+            ("(岗位名, 公司) 精确去重", len(rows) - identity_removed, key_removed),
+            ("模糊去重", len(rows) - identity_removed, fuzzy_removed),
+        ]
+    )
+    if alerts:
+        logger.warning("去重删除比例过高 | alerts={}", alerts)
+
     return {
-        "total": len(after_fuzzy),
-        "deduped_rows": after_fuzzy,
-        "exact_dedup_count": exact_removed,
+        "total": len(deduped),
+        "deduped_rows": deduped,
+        # 键名保持兼容：`exact_dedup_count` 现在是「按唯一标识（编码/链接）删除数」
+        "exact_dedup_count": identity_removed,
         "title_company_dedup_count": key_removed,
         "fuzzy_dedup_count": fuzzy_removed,
+        # 新增可观测字段
+        "identity_count": identity_count,
+        "unidentified_count": len(unidentified_kept) + key_removed + fuzzy_removed,
+        "dedup_alerts": alerts,
     }

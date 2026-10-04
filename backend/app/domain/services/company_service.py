@@ -222,6 +222,29 @@ def normalise_geo_name(value: object, *, kind: str | None = None) -> str | None:
     return shortened or None
 
 
+#: 城市短名 → 省份短名（由 `PROVINCE_CITIES` 反向构建，**纯派生**，无人工数据）
+_CITY_TO_PROVINCE: dict[str, str] = {
+    city: province for province, cities in PROVINCE_CITIES.items() for city in cities
+}
+
+
+def province_of_city(city: object) -> str | None:
+    """由**城市**反查省份短名；查不到返回 ``None``。
+
+    存在的原因（2026-10-03）：用户的导入表**没有「省份」列**（实测 524 行表 12 列里没有），
+    于是 `companies.region` 全是 `None` —— 管理端「先选省、再选市」的**省份列表会是空的**。
+    实测这份表的 70 个城市 **70/70** 都能在本表里查到省份，所以推导是可靠的、零成本的。
+
+    先走 `normalise_geo_name(kind='city')` 取短名，保证与写库/下拉同一套写法。
+    """
+    if city is None:
+        return None
+    short = normalise_geo_name(city, kind=GEO_KIND_CITY)
+    if not short:
+        return None
+    return _CITY_TO_PROVINCE.get(short)
+
+
 async def upsert_company(
     session: AsyncSession,
     name: str | None,
@@ -426,6 +449,7 @@ __all__ = [
     "link_job_company",
     "normalise_company_name",
     "normalise_geo_name",
+    "province_of_city",
     "refresh_job_count",
     "sync_all_job_counts",
     "upsert_company",

@@ -85,12 +85,60 @@ def _cleanup_rows() -> None:
 
 @pytest.fixture(scope="module")
 def clean_llm_registry():
-    """进模块前先清一次（防上次中断残留），出模块后彻底恢复。"""
+    """进模块前清一次（防上次中断残留），出模块后**还原真实绑定**再清。
+
+    ⚠️ 为什么必须还原（2026-10-04 实测事故）：本模块的用例会通过管理端接口把
+    `default` / `job_extract` / `job_portrait` 绑到测试模型、再**解绑**
+    （`_bind(..., None)`，见 `test_default_route_switches_current_model`）来验证
+    "解绑后回到 env 兜底"。解绑是**真删 `llm_routes` 里的行** —— 被删掉的那一行
+    如果本来绑着真实模型（本机 dev 库就是：default/job_extract/job_portrait 都绑着），
+    跑完测试真实绑定就永久丢了，而且**没有任何报错**。
+
+    后果极隐蔽：网关照 DB 配置（`source=db`）后，未绑的功能键**不会**回退到 env 里的
+    `LLM_DEFAULT_MODEL`（2026-09-25 决策②）→ 抽取 / 画像 / 聚合 全部拿到
+    `LLMGatewayError: 未配置默认模型`，而各工具**按设计返回骨架**继续跑完整单：
+    实测 524 行导入"成功"，而 47 条画像的六维全是 `{"score": 3}`、`payload.extract` 全空、
+    75 个聚合组 0.4 秒内全失败。所以本 fixture 必须把绑定原样还原。
+    """
     _cleanup_rows()
+    saved_routes = asyncio.run(_snapshot_routes())
     yield
     _cleanup_rows()
+    asyncio.run(_restore_routes(saved_routes))
     clear_registry_snapshot()
     clear_gateway_cache()
+
+
+async def _snapshot_routes() -> dict[str, int]:
+    """记下跑本模块之前**真实存在**的功能键绑定（`function_key -> model_id`）。"""
+    from app.domain.models.llm_config import LLMRoute
+
+    async with test_session_factory() as session:
+        rows = (await session.execute(select(LLMRoute.function_key, LLMRoute.model_id))).all()
+    return {function_key: model_id for function_key, model_id in rows}
+
+
+async def _restore_routes(saved: dict[str, int]) -> None:
+    """把 `llm_routes` 还原成 `saved`：测试新绑的去掉、被解绑的补回。"""
+    from app.domain.models.llm_config import LLMRoute
+
+    async with test_session_factory() as session:
+        current = {
+            row.function_key: row
+            for row in (await session.execute(select(LLMRoute))).scalars().all()
+        }
+        for function_key, row in current.items():
+            if function_key not in saved:
+                await session.delete(row)
+            elif row.model_id != saved[function_key]:
+                row.model_id = saved[function_key]
+        for function_key, model_id in saved.items():
+            if function_key not in current:
+                session.add(LLMRoute(function_key=function_key, model_id=model_id))
+        await session.commit()
+        await reload_registry(session)
+        await session.commit()
+    invalidate_llm_registry()
 
 
 def _headers(token: str) -> dict[str, str]:

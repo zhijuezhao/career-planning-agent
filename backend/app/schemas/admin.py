@@ -426,6 +426,13 @@ class ImportProgressResponse(BaseModel):
     success_count: int
     error_count: int
     progress_pct: float
+    # ── B3（2026-10-03）切片闸门：前端据此显示「第 k/N 片」并决定是否亮"继续下一片"──
+    slice_total: int | None = None
+    slice_done: int | None = None
+    slice_next: int | None = None
+    slice_state: str | None = None
+    #: 空表 / 读取失败等原因（有值时前端应直接提示，而不是显示"进度 0%"）
+    slice_warning: str | None = None
 
 
 # ── LLM 配置中心 Schemas（B2-1：供应商 / 模型 / 功能路由 / 连通性）─────────────

@@ -48,6 +48,60 @@ class TestBuildJobText:
         assert "Java" in text
 
 
+class TestKeySkillsInJobText:
+    """B5（2026-10-03）：`key_skills` 必须进岗位向量。
+
+    此前岗位向量里只有**抽取器那条招聘**的技能，而综合出来的岗位核心技能
+    （`aggregate_card.core_skills`）完全没进去 —— 学生侧的向量本来就含技能，
+    两边口径不一致，技能匹配被系统性低估。
+    """
+
+    def test_prefers_aggregate_card_core_skills(self):
+        job = JobProfile(
+            title="Java",
+            level="初级",
+            hard_skills={"tags": ["Java"]},
+            aggregate_card={"core_skills": ["Java", "Spring Boot", "MySQL"]},
+            requirement_intensity={"专业技术能力": {"score": 3, "key_skills": ["旧数据"]}},
+        )
+        text = build_job_text(job)
+        assert "核心技能：Java、Spring Boot、MySQL" in text
+        assert "旧数据" not in text, "综合卡优先，旧字段不该再出现"
+
+    def test_falls_back_to_requirement_intensity(self):
+        """未聚合的旧数据：退回画像六维里的 key_skills。"""
+        job = JobProfile(
+            title="Java",
+            requirement_intensity={"专业技术能力": {"score": 3, "key_skills": ["Redis"]}},
+        )
+        assert "核心技能：Redis" in build_job_text(job)
+
+    def test_bonus_skills_are_included(self):
+        job = JobProfile(
+            title="Java",
+            hard_skills={"tags": ["Java"], "bonus_tags": ["Go", "Rust"]},
+        )
+        text = build_job_text(job)
+        assert "加分技能：Go、Rust" in text
+
+    def test_skills_are_normalised_on_both_sides(self):
+        """归一化后 `Java开发` 与 `Java` 才是同一个词，否则向量里对不上。"""
+        job = JobProfile(
+            title="Java",
+            aggregate_card={"core_skills": ["Java开发", "MySQL数据库", "springboot"]},
+        )
+        text = build_job_text(job)
+        assert "核心技能：Java、MySQL、Spring Boot" in text
+
+    def test_extract_key_skills_helper(self):
+        from app.core.matching.job_matcher import extract_key_skills
+
+        assert extract_key_skills(JobProfile(title="x")) == []
+        assert extract_key_skills(
+            JobProfile(title="x", aggregate_card={"core_skills": ["Java"]})
+        ) == ["Java"]
+
+
 class TestComputeMatchScore:
     def test_perfect_match(self):
         score, analysis = compute_match_score(
@@ -86,6 +140,88 @@ class TestComputeMatchScore:
             weights={},
         )
         assert 0.0 <= score <= 1.0
+
+
+class TestSkillDimensionInMatchScore:
+    """B5：技能命中率按 `base*(1-w) + hit_ratio*w` **混合**进总分。
+
+    为什么不加第三项再归一化：既有 0.4（向量）/0.6（六维）的比例是历史契约，
+    改了会让所有历史快照分数不可比。`w=0` 时必须与改动前**逐字一致**。
+    """
+
+    BASE = dict(
+        vector_score=0.2,
+        user_dimension_scores={"技术": 4.0},
+        job_dimension_scores={"技术": 4.0},
+        weights={"技术": 1.0},
+    )
+
+    def test_weight_zero_keeps_legacy_score(self):
+        """权重 0 → 分数与改动前**完全一致**（向后兼容的硬要求）。
+
+        `skill_match` 仍会写进 analysis（那是信息），但要写明"不计分的原因"，
+        而不是让它看起来像"岗位没有技能要求"。
+        """
+        legacy_score, legacy_analysis = compute_match_score(**self.BASE)
+        same_score, same_analysis = compute_match_score(
+            **self.BASE,
+            skill_overlap={"hit_ratio": 0.1, "job_total": 10, "matched": [], "missing": []},
+            skill_weight=0.0,
+        )
+        assert same_score == legacy_score
+        assert same_analysis["dimension_score"] == legacy_analysis["dimension_score"]
+        assert same_analysis["skill_match"]["weight"] == 0.0
+        assert "MATCHING_SKILL_WEIGHT" in same_analysis["skill_match"]["skipped"]
+
+    def test_no_skill_overlap_keeps_analysis_clean(self):
+        """完全不传技能信息（旧调用方）→ analysis 里不该凭空多出 `skill_match`。"""
+        _score, analysis = compute_match_score(**self.BASE)
+        assert "skill_match" not in analysis
+
+    def test_weight_moves_score_towards_hit_ratio(self):
+        base_score, _ = compute_match_score(**self.BASE)
+        high, high_analysis = compute_match_score(
+            **self.BASE,
+            skill_overlap={"hit_ratio": 1.0, "job_total": 4, "matched": ["Java"], "missing": []},
+            skill_weight=0.15,
+        )
+        low, _ = compute_match_score(
+            **self.BASE,
+            skill_overlap={"hit_ratio": 0.0, "job_total": 4, "matched": [], "missing": ["Java"]},
+            skill_weight=0.15,
+        )
+        assert low < base_score < high
+        assert high_analysis["base_score"] == round(base_score, 4)
+        assert high_analysis["skill_match"]["hit_ratio"] == 1.0
+
+    def test_job_without_skills_does_not_score(self):
+        """岗位没提取到核心技能 → 这一维不计分，但要写明原因（别被读成"完全匹配"）。"""
+        base_score, _ = compute_match_score(**self.BASE)
+        score, analysis = compute_match_score(
+            **self.BASE,
+            skill_overlap={"hit_ratio": 0.0, "job_total": 0, "matched": [], "missing": []},
+            skill_weight=0.15,
+        )
+        assert score == base_score
+        assert analysis["skill_match"]["weight"] == 0.0
+        assert "未提取到核心技能" in analysis["skill_match"]["skipped"]
+
+
+class TestCandidateSkills:
+    def test_reads_frozen_snapshot(self):
+        """学生技能读**冻结快照**：改完简历后历史匹配分数必须还能复现。"""
+        from app.core.matching.job_matcher import _candidate_skills
+
+        snapshot = MagicMock()
+        snapshot.five_layers_json = {"hard_skills": {"tags": ["Java开发", "MySQL"]}}
+        assert _candidate_skills(snapshot) == ["Java开发", "MySQL"]
+
+    def test_missing_fields(self):
+        from app.core.matching.job_matcher import _candidate_skills
+
+        snapshot = MagicMock()
+        snapshot.five_layers_json = {}
+        assert _candidate_skills(snapshot) == []
 
 
 class TestSearchJobsByVector:

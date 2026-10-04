@@ -5,6 +5,8 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 
+from app.config import get_settings
+from app.core.skills import match_skill_overlap
 from app.domain.models.dimension_score import DimensionScore
 from app.domain.models.dimension_weight import DimensionWeight
 from app.domain.models.job import JobProfile
@@ -14,8 +16,46 @@ from app.domain.services.job_query_service import job_dimension_scores
 from app.infrastructure.database import async_session_factory
 
 
+def extract_key_skills(job: JobProfile) -> list[str]:
+    """岗位的**关键技能**（画像里「专业技术能力」维度下的 `key_skills`）。
+
+    B5（2026-10-03）用户要求「要 key_skills 参与人岗匹配」。为什么不能只靠
+    `hard_skills`：抽取器的 `hard_skills` 是**逐条招聘**的产物，
+    而 `key_skills` 是**综合画像**里精提过的核心技能清单（B4 的综合卡），
+    粒度与"这个岗位到底要什么"更对得上。
+
+    读取优先级：综合卡 `aggregate_card.core_skills`（B4 产物）→
+    画像六维里的 `key_skills`（旧数据/未聚合时）。
+    """
+    card = job.aggregate_card if isinstance(job.aggregate_card, dict) else None
+    if card:
+        core = card.get("core_skills")
+        if isinstance(core, list) and core:
+            return [str(item) for item in core]
+
+    intensity = job.requirement_intensity
+    if isinstance(intensity, dict):
+        technical = intensity.get("专业技术能力")
+        if isinstance(technical, dict):
+            skills = technical.get("key_skills")
+            if isinstance(skills, list) and skills:
+                return [str(item) for item in skills]
+    return []
+
+
 def build_job_text(job: JobProfile) -> str:
-    """Build a text representation of a job profile for embedding."""
+    """Build a text representation of a job profile for embedding.
+
+    ⚠️ B5（2026-10-03）：**必须把 `key_skills` 也拼进来**。
+    学生侧的向量文本本来就含 `hard_skills.tags`（见 `resume_agent/embedding_text.py`），
+    而岗位侧此前只有抽取器那条招聘的技能 —— 两边口径不一致，
+    综合出来的岗位核心技能（`key_skills`）**完全没进向量**，
+    等于"技能匹配"只覆盖了 1 条招聘的技能。现在两边都过
+    `core.skills.normalise_skills()`，同一件事不会再因为
+    `Java开发` vs `Java` 而算成两个。
+    """
+    from app.core.skills import normalise_skills
+
     parts: list[str] = []
 
     if job.title:
@@ -25,13 +65,23 @@ def build_job_text(job: JobProfile) -> str:
     if job.level:
         parts.append(f"级别：{job.level}")
 
+    # 综合卡的核心技能优先（已归约）；没有再回落到 hard_skills
+    key_skills = normalise_skills(extract_key_skills(job))
+    if key_skills:
+        parts.append(f"核心技能：{'、'.join(key_skills)}")
+
     if job.hard_skills:
         if isinstance(job.hard_skills, dict):
-            tags = job.hard_skills.get("tags", [])
+            tags = normalise_skills(job.hard_skills.get("tags", []))
+            bonus = normalise_skills(job.hard_skills.get("bonus_tags", []))
             if tags:
                 parts.append(f"技能要求：{'、'.join(tags)}")
+            if bonus:
+                parts.append(f"加分技能：{'、'.join(bonus)}")
         elif isinstance(job.hard_skills, list):
-            parts.append(f"技能要求：{'、'.join(job.hard_skills)}")
+            tags = normalise_skills(job.hard_skills)
+            if tags:
+                parts.append(f"技能要求：{'、'.join(tags)}")
 
     if job.soft_skills:
         if isinstance(job.soft_skills, dict):
@@ -288,6 +338,9 @@ def compute_match_score(
     user_dimension_scores: dict[str, float],
     job_dimension_scores: dict[str, float],
     weights: dict[str, float],
+    *,
+    skill_overlap: dict[str, Any] | None = None,
+    skill_weight: float = 0.0,
 ) -> tuple[float, dict[str, Any]]:
     """Compute comprehensive match score combining vector similarity and dimension scores.
 
@@ -296,6 +349,10 @@ def compute_match_score(
         user_dimension_scores: User's dimension scores {dimension: score}.
         job_dimension_scores: Job's dimension scores {dimension: score}.
         weights: Dimension weights {dimension: weight}.
+        skill_overlap: B5 的技能命中情况（`core.skills.match_skill_overlap` 的产物）。
+            为 None 时行为与改动前**逐字一致**。
+        skill_weight: 技能维度的权重（0 = 不计入总分，只写进 analysis）。
+            默认 0 保证既有调用方（含测试与历史快照）不受影响。
 
     Returns:
         Tuple of (final_score, analysis_dict).
@@ -335,14 +392,39 @@ def compute_match_score(
     # Final score: weighted combination
     vector_weight = 0.4
     dimension_weight = 0.6
-    final_score = vector_similarity * vector_weight + dimension_score * dimension_weight
+    base_score = vector_similarity * vector_weight + dimension_score * dimension_weight
 
-    analysis = {
+    analysis: dict[str, Any] = {
         "vector_similarity": round(vector_similarity, 4),
         "dimension_score": round(dimension_score, 4),
         "dimension_matches": dimension_matches,
         "weights_used": weights,
     }
+
+    # ── B5（2026-10-03）：显式技能命中率 ────────────────────────────────────────
+    # 用户要求「要 key_skills 参与人岗匹配」且「方案 A+B」：
+    #   A 把 key_skills 拼进岗位向量（`build_job_text`）→ 负责**召回**；
+    #   B 在这里额外算一项"技能命中率" → 负责**可解释**（学生端能看到差在哪）。
+    #
+    # 为什么按 `(1 - w)` 混合而不是加第三项权重再归一化：
+    # 原公式里 vector 0.4 / dimension 0.6 的比例是既有契约（有历史快照与测试），
+    # 直接改会让所有历史分数不可比。`w=0` 时与改动前**逐字一致**。
+    final_score = base_score
+    if skill_overlap:
+        hit_ratio = float(skill_overlap.get("hit_ratio") or 0.0)
+        if skill_weight > 0 and skill_overlap.get("job_total"):
+            final_score = base_score * (1 - skill_weight) + hit_ratio * skill_weight
+            analysis["skill_match"] = {**skill_overlap, "weight": skill_weight}
+            analysis["base_score"] = round(base_score, 4)
+        else:
+            # 这一维不计分 —— 但**必须写明是哪种原因**，否则学生端会看到
+            # "岗位未提取到核心技能" 却其实是权重配成了 0（两种情况的处置完全不同）。
+            reason = (
+                "技能维度权重为 0（MATCHING_SKILL_WEIGHT），只记录命中情况不计分"
+                if skill_weight <= 0
+                else "岗位未提取到核心技能，本维不计分"
+            )
+            analysis["skill_match"] = {**skill_overlap, "weight": 0.0, "skipped": reason}
 
     return round(final_score, 4), analysis
 
@@ -350,6 +432,18 @@ def compute_match_score(
 def _candidate_scores(snapshot: ProfileSnapshot) -> dict[str, float]:
     """候选方六维分数：读快照冻结 JSON（不再查 DimensionScore candidate 行）"""
     return dict(snapshot.six_dim_scores_json or {})
+
+
+def _candidate_skills(snapshot: ProfileSnapshot) -> list[str]:
+    """候选方**技能清单**：读快照冻结的五层画像（`hard_skills.tags`）。
+
+    为什么读快照而不是实时查学生档案：匹配必须与"冻结那一刻的画像"一致，
+    否则学生改完简历后历史匹配记录的分数无法复现（快照机制存在的理由）。
+    """
+    five_layers = getattr(snapshot, "five_layers_json", None) or {}
+    hard = five_layers.get("hard_skills") if isinstance(five_layers, dict) else None
+    tags = hard.get("tags") if isinstance(hard, dict) else None
+    return [str(item) for item in (tags or [])]
 
 
 async def _match_snapshot(
@@ -383,6 +477,9 @@ async def _match_snapshot_detailed(
 
     # Step 2: User dimension scores come from the snapshot's frozen JSON
     user_dims = _candidate_scores(snapshot)
+    # B5：学生侧技能也读同一份冻结快照（`five_layers_json.hard_skills.tags`）
+    user_skills = _candidate_skills(snapshot)
+    skill_weight = float(get_settings().matching_skill_weight or 0.0)
 
     # Step 3: Score each hit
     results: list[dict[str, Any]] = []
@@ -399,17 +496,32 @@ async def _match_snapshot_detailed(
             # 六维对比实际完全没参与。缺画像时仍是 `{}`（行为与切换前一致，不会更差）。
             job_dims = await job_dimension_scores(session, job_profile_id)
 
-            # Per-hit job-industry weights (R-5.1)
-            job_result = await session.execute(
-                select(JobProfile.industry).where(JobProfile.id == job_profile_id)
-            )
-            job_industry = job_result.scalar_one_or_none() or "技术研发岗"
+            # 岗位行：既取行业（配权重 R-5.1），也取**核心技能**（B5 的技能维度）。
+            # 一次查询两用 —— 原先只 select industry，现在换成整行，查询数不变。
+            job_profile = (
+                await session.execute(select(JobProfile).where(JobProfile.id == job_profile_id))
+            ).scalar_one_or_none()
+            job_industry = (job_profile.industry if job_profile else None) or "技术研发岗"
             weights = await get_dimension_weights(job_industry, session=session)
             if not weights:
                 weights = {dim: 1.0 for dim in user_dims}
 
+            # B5：显式技能命中率（`Java开发` 与 `Java` 都归约成 `Java`，所以能对上）
+            skill_overlap = None
+            if job_profile is not None:
+                job_skills = extract_key_skills(job_profile)
+                if job_skills or user_skills:
+                    skill_overlap = match_skill_overlap(user_skills, job_skills)
+
             # Compute score
-            score, analysis = compute_match_score(distance, user_dims, job_dims, weights)
+            score, analysis = compute_match_score(
+                distance,
+                user_dims,
+                job_dims,
+                weights,
+                skill_overlap=skill_overlap,
+                skill_weight=skill_weight,
+            )
         except Exception as exc:  # noqa: BLE001 - 行级容错，失败岗位单独报告
             logger.warning(
                 "单岗位打分失败 | job_profile_id={} | error={}", job_profile_id, exc

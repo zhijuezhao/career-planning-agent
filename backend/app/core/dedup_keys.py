@@ -1,10 +1,13 @@
-"""岗位去重键（P2，2026-09-26 用户拍板；2026-09-27 任务 3 收口）。
+"""岗位去重键（P2，2026-09-26 用户拍板；2026-09-27 任务 3 收口；2026-10-03 B4 加等级）。
 
 **粒度分两层，别混**：
 
-- **落库唯一键**（`job_profiles`）= **只有归一化岗位名**（`uq_job_profiles_title_key`）。
+- **落库唯一键**（`job_profiles`）= **归一化岗位名 + 等级**（`uq_job_profiles_title_level`）。
   岗位是**角色级**的，"同名被 N 家公司招" = **1 条岗位 + N 条 `job_company_links`**
   （用户 2026-09-27 拍板的多对多），不再像 P2 那样落成 N 条画像。
+  B4（2026-10-03）起用户要求「划分出初中高级岗位」，于是唯一键再加一维等级：
+  同一个岗位名按 初级/中级/高级/不限 各留一条画像（`level` 必须 NOT NULL，
+  否则唯一索引里的 NULL 互不相等会写出重复行）。
 - **文件内去重**（`job_dedup_key`）= `(归一化岗位名, 归一化公司名)`。这是"同一份表里
   两行是否重复"的判断：同名**同公司**才是重复；同名**不同公司**必须都留下，
   否则会丢掉一条在招关联。
@@ -72,9 +75,38 @@ def job_dedup_key(title: object, company: object) -> tuple[str, str]:
     return normalise_title(title), (normalise_company_name(company) or "")
 
 
+#: URL 的查询串与 fragment（`?refcode=…&preactionid=…` / `#anchor`）
+_URL_QUERY_OR_FRAGMENT = re.compile(r"[?#].*$", re.DOTALL)
+
+_URL_PLACEHOLDERS = frozenset({"none", "nan", "null", "-", "--", "无", "未知"})
+
+
+def normalise_source_url(url: object) -> str | None:
+    """岗位来源链接归一化：**去掉查询串与 fragment**；占位值返回 None。
+
+    为什么必须去查询串（2026-10-03 实测用户真实数据）：
+    智联的岗位详情 URL 形如::
+
+        https://www.zhaopin.com/jobdetail/CC383625320J40658720509.htm
+            ?refcode=4019&srccode=401901&preactionid=<导出会话id>
+
+    其中 `preactionid` 在**一次导出里只有一个值**（我实测 524 行全表就 1 个值）——
+    它是**导出会话 id**，用户下次重新导出同一批岗位时它一定会变。
+    若拿完整 URL 当去重键 / 幂等键，"同一份表再导一次"会被判成一批全新岗位，
+    幂等性直接失效。去掉查询串后剩下的路径段（`…/CC…htm`）里嵌的就是岗位编码，稳定。
+    """
+    if url is None:
+        return None
+    text = " ".join(str(url).split()).strip()
+    if not text or text.lower() in _URL_PLACEHOLDERS:
+        return None
+    return _URL_QUERY_OR_FRAGMENT.sub("", text) or None
+
+
 __all__ = [
     "TITLE_KEY_SQL",
     "job_dedup_key",
     "normalise_company_name",
+    "normalise_source_url",
     "normalise_title",
 ]

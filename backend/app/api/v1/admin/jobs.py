@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin.auth import require_admin
 from app.core.dedup_keys import normalise_title
+from app.core.job_agent.levels import normalise_level
 from app.core.matching import embed_job
 from app.domain.models.company import Company
 from app.domain.models.job import JobProfile
@@ -153,26 +154,37 @@ async def get_job(
     return detail
 
 
-async def _assert_title_free(
+async def _assert_profile_key_free(
     db: AsyncSession,
     *,
     title: str,
+    level: str,
     exclude_id: int | None = None,
 ) -> None:
-    """**岗位名唯一** —— 管理端手工建/改岗位时先查一次，撞了给 **409** 而不是 500。
+    """**`(岗位名, 等级)` 唯一** —— 管理端手工建/改岗位时先查一次，撞了给 **409** 而不是 500。
 
-    ⚠️ 2026-09-27 任务 2 起去重键**只有岗位名**（`title_key`，忽略大小写与空格）：
-    岗位是**角色级**的，"同名不同公司"是关联表上的多条记录，不再落成多条岗位。
+    ⚠️ 去重键的两次变化：
+    * 2026-09-27 任务 2 起**只有岗位名**（`title_key`，忽略大小写与空格）——
+      岗位是**角色级**的，"同名不同公司"是关联表上的多条记录；
+    * **B4（2026-10-03）起加上等级**（唯一索引 `uq_job_profiles_title_level`）——
+      同一个岗位名按 初级/中级/高级/不限 各一条画像。所以"同名不同等级"是
+      **两条合法画像**，不能再被这条校验拦下来（拦了管理端就建不出高级岗）。
     并发下仍可能漏过这里，所以调用方还要兜 `IntegrityError`。
     """
-    query = select(JobProfile.id).where(JobProfile.title_key == normalise_title(title))
+    query = select(JobProfile.id).where(
+        JobProfile.title_key == normalise_title(title),
+        JobProfile.level == normalise_level(level),
+    )
     if exclude_id is not None:
         query = query.where(JobProfile.id != exclude_id)
     duplicate_id = (await db.execute(query.limit(1))).scalar_one_or_none()
     if duplicate_id is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"岗位已存在：同名（忽略大小写与空格）的岗位 id={duplicate_id}",
+            detail=(
+                f"岗位已存在：同名的「{normalise_level(level)}」岗位 id={duplicate_id}"
+                "（岗位名忽略大小写与空格；同名不同等级是两条独立画像）"
+            ),
         )
 
 
@@ -183,10 +195,15 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new job profile."""
-    # 管理端没有"公司"输入项：岗位是**角色级**的，去重键只有岗位名（2026-09-27 任务 2）
-    await _assert_title_free(db, title=data.title)
+    # 管理端没有"公司"输入项：岗位是**角色级**的，去重键是 (岗位名, 等级)（B4 起加等级）
+    level = normalise_level(data.level)
+    await _assert_profile_key_free(db, title=data.title, level=level)
 
-    job = JobProfile(**data.model_dump())
+    # ⚠️ `level` 必须显式给值：`JobProfileCreate.level` 默认是 None，
+    # 而 `level` 列 **NOT NULL**（唯一索引里 NULL 互不相等）——
+    # 直接 `JobProfile(**data.model_dump())` 会插 NULL → IntegrityError →
+    # 被下面的兜底误报成"岗位已存在（同名，并发写入）"（B4 引入的缺陷，2026-10-04 修复）。
+    job = JobProfile(**{**data.model_dump(), "level": level})
     db.add(job)
     try:
         await db.flush()
@@ -216,10 +233,24 @@ async def update_job(
         raise HTTPException(status_code=404, detail="Job profile not found")
 
     update_data = data.model_dump(exclude_unset=True)
+    # `level` 是唯一键的一部分、且列 NOT NULL：显式传 null 会让 UPDATE 撞 NOT NULL，
+    # 所以统一收敛（认不出来 → 不限），与持久层 `normalise_level` 同一口径。
+    if "level" in update_data:
+        update_data["level"] = normalise_level(update_data["level"])
     if "title" in update_data and update_data["title"]:
-        # 改标题可能撞上另一条同键岗位 → 同样给 409（不然是 500）
-        await _assert_title_free(
-            db, title=str(update_data["title"]), exclude_id=job.id
+        # 改标题**或改等级**都可能撞上另一条同键岗位 → 同样给 409（不然是 500）
+        await _assert_profile_key_free(
+            db,
+            title=str(update_data["title"]),
+            level=str(update_data.get("level") or job.level),
+            exclude_id=job.id,
+        )
+    elif "level" in update_data:
+        await _assert_profile_key_free(
+            db,
+            title=job.title,
+            level=str(update_data["level"]),
+            exclude_id=job.id,
         )
     for field, value in update_data.items():
         setattr(job, field, value)
@@ -229,7 +260,8 @@ async def update_job(
     except IntegrityError as exc:
         await db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="岗位已存在（同名，并发写入）"
+            status_code=status.HTTP_409_CONFLICT,
+            detail="岗位已存在（同名同等级，并发写入）",
         ) from exc
     await db.refresh(job)
     return job

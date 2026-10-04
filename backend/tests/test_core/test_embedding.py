@@ -48,6 +48,16 @@ def test_build_portrait_text_partial_layers():
     assert "目标岗位" not in text
 
 
+def test_build_portrait_text_normalises_skills():
+    """B5（2026-10-03）：学生技能要过归一化 —— 岗位侧用同一套。
+
+    两边不一致的话，学生写的 `Java开发` 与岗位写的 `Java` 在向量空间里是两个词，
+    "技能匹配"会被系统性低估。
+    """
+    text = build_portrait_text({"hard_skills": {"tags": ["Java开发", "MySQL数据库", "springboot"]}})
+    assert "技术栈：Java、MySQL、Spring Boot" in text
+
+
 @pytest.mark.asyncio
 async def test_profile_embedder_success():
     mock_vector = [0.1] * 1024

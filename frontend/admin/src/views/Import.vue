@@ -52,11 +52,40 @@ interface ImportPersistStats {
   failed?: number
 }
 
+/** B3（2026-10-03）切片状态：清单 + 逐片进度 + 累计计数 */
+interface ImportSliceItem {
+  k: number
+  row_start: number
+  row_end: number
+  rows: number
+  file?: string | null
+}
+
+interface ImportSlicesStats {
+  batch_id?: string
+  total_rows?: number
+  slice_size?: number
+  slice_count?: number
+  slices?: ImportSliceItem[]
+  /** 已完成片号 */
+  done?: number[]
+  /** 下一片片号 */
+  next?: number
+  state?: string
+  cumulative?: { rows?: number; passed?: number; rejected?: number }
+  /** 空表 / 读取失败：有值时必须显式提示，不能显示成「进度 0%」 */
+  warning?: string
+  error?: string
+  manifest_file?: string
+}
+
 interface ImportStats {
   schema?: ImportSchema
   persist?: ImportPersistStats
   /** B3-1/B3-2 链接富化统计（B3-3 起在导入页专门展示） */
   link_enrich?: LinkEnrichStats
+  /** B3 切片清单与逐片进度 */
+  slices?: ImportSlicesStats
 }
 
 /** 体裁 → 中文（与后端 schema_detect 的取值一致） */
@@ -73,9 +102,26 @@ type TagType = 'success' | 'danger' | 'warning' | 'info'
 const STATUS_META: Record<string, { label: string; type: TagType }> = {
   pending: { label: '待处理', type: 'info' },
   processing: { label: '处理中', type: 'warning' },
+  // B3 切片闸门：一片跑完停在这里，等管理员点「继续下一片」。
+  // 刻意用 warning 色 —— 它不是成功也不是失败，而是「需要你确认」。
+  awaiting_confirmation: { label: '待确认（有下一片）', type: 'warning' },
   completed: { label: '成功', type: 'success' },
   failed: { label: '失败', type: 'danger' },
 }
+
+/** 该工单是否可以「开始 / 继续下一片」（与后端 IMPORT_PROCESSABLE_STATUSES 对齐） */
+const PROCESSABLE = new Set(['pending', 'failed', 'awaiting_confirmation'])
+
+/** 切片进度文案：`第 3/11 片`（无切片信息时返回空串） */
+const sliceText = (row: ImportJob): string => {
+  const s = row.stats?.slices
+  if (!s?.slice_count) return ''
+  const done = (s.done ?? []).length
+  return `第 ${done}/${s.slice_count} 片${s.next ? `（下一片 #${s.next}）` : ''}`
+}
+
+/** 切片告警/空表提示（有值时前端必须显式提示，而不是显示「进度 0%」） */
+const sliceWarning = (row: ImportJob): string => row.stats?.slices?.error ?? row.stats?.slices?.warning ?? ''
 
 const loading = ref(false)
 const tableData = ref<ImportJob[]>([])
@@ -141,6 +187,10 @@ const startProgressPolling = (jobId: number) => {
         processed_rows: number
         success_count: number
         error_count: number
+        slice_total?: number | null
+        slice_done?: number | null
+        slice_next?: number | null
+        slice_state?: string | null
       }>(`/v1/admin/import/${jobId}/progress`)
       progress.value = res.progress_pct
 
@@ -151,11 +201,26 @@ const startProgressPolling = (jobId: number) => {
         row.processed_rows = res.processed_rows
         row.success_count = res.success_count
         row.error_count = res.error_count
+        // B3：把切片进度也同步到行上（顶部轮询不走 fetchData，切片号要跟着更新）
+        if (row.stats?.slices && res.slice_total) {
+          row.stats.slices.done = Array.from({ length: res.slice_done ?? 0 }, (_, i) => i + 1)
+          row.stats.slices.next = res.slice_next ?? undefined
+          row.stats.slices.state = res.slice_state ?? undefined
+        }
       }
 
       if (res.status === 'completed' || res.status === 'failed') {
         stopProgressPolling()
         ElMessage.success(res.status === 'completed' ? '导入完成' : '导入失败，可点「原因」查看')
+        await fetchData()
+      } else if (res.status === 'awaiting_confirmation') {
+        // B3 暂停闸门：**停轮询、不自动续跑**，等管理员点「继续下一片」。
+        // 这一条就是用户要的"每一个传输完成后就暂停，等待人工确认"。
+        stopProgressPolling()
+        const total = res.slice_total ?? 0
+        ElMessage.warning(
+          `第 ${res.slice_done ?? 0}/${total} 片已完成，已暂停等待确认。确认无误后点「继续下一片」。`,
+        )
         await fetchData()
       }
     } catch {
@@ -324,7 +389,7 @@ onBeforeUnmount(stopProgressPolling)
         <el-table-column label="导入时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="90">
+        <el-table-column label="状态" width="150">
           <template #default="{ row }">
             <el-tag :type="statusOf(row.status).type" size="small">
               {{ statusOf(row.status).label }}
@@ -341,7 +406,7 @@ onBeforeUnmount(stopProgressPolling)
             <span :class="row.error_count > 0 ? 'bad' : 'muted'">{{ row.error_count }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="进度" min-width="180">
+        <el-table-column label="进度" min-width="220">
           <template #default="{ row }">
             <div class="progress-cell">
               <el-progress
@@ -353,6 +418,9 @@ onBeforeUnmount(stopProgressPolling)
               />
               <span class="progress-text">{{ row.processed_rows }}/{{ row.total_rows }}</span>
             </div>
+            <!-- B3 切片：显示「第 k/N 片」；空表/读取失败要显式提示，不能只显示 0% -->
+            <div v-if="sliceText(row)" class="slice-text">{{ sliceText(row) }}</div>
+            <div v-if="sliceWarning(row)" class="slice-warning">{{ sliceWarning(row) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="链接富化" min-width="170">
@@ -367,8 +435,18 @@ onBeforeUnmount(stopProgressPolling)
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="210" fixed="right">
+        <el-table-column label="操作" width="290" fixed="right">
           <template #default="{ row }">
+            <!-- B3 切片闸门：待确认时这个按钮就是"放行下一片"（用户要的人工确认点） -->
+            <el-button
+              v-if="PROCESSABLE.has(row.status)"
+              type="warning"
+              size="small"
+              link
+              @click="handleProcess(row.id)"
+            >
+              {{ row.status === 'awaiting_confirmation' ? '继续下一片' : '处理' }}
+            </el-button>
             <el-button
               type="primary"
               size="small"
@@ -518,5 +596,19 @@ onBeforeUnmount(stopProgressPolling)
 .sep {
   margin: 0 2px;
   color: #c0c4cc;
+}
+
+/* B3 切片：片号说明（弱化）+ 空表/读取失败提示（警示色，必须显眼） */
+.slice-text {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.slice-warning {
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e6a23c;
 }
 </style>

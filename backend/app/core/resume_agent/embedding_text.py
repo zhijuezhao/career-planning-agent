@@ -2,6 +2,15 @@ from __future__ import annotations
 
 
 def build_portrait_text(five_layers: dict) -> str:
+    """把学生五层画像拼成**向量文本**。
+
+    ⚠️ B5（2026-10-03）：技能必须先过 `core.skills.normalise_skills()`。
+    岗位侧向量文本用的是同一套归一化（`job_matcher.build_job_text`），
+    两边不一致的话 `Java开发`（学生写的）与 `Java`（岗位写的）在向量空间里
+    就是两个词，"技能匹配"会被系统性低估。
+    """
+    from app.core.skills import normalise_skills
+
     parts: list[str] = []
 
     intention = five_layers.get("intention", {})
@@ -16,7 +25,7 @@ def build_portrait_text(five_layers: dict) -> str:
         parts.append(f"目标城市：{'、'.join(cities)}")
 
     hard_skills = five_layers.get("hard_skills", {})
-    tags = hard_skills.get("tags", [])
+    tags = normalise_skills(hard_skills.get("tags", []))
     edu = hard_skills.get("education", {})
     certs = hard_skills.get("certificates", [])
     if tags:

@@ -4,6 +4,7 @@ from app.core.job_agent.tools.pre_cleaner import (
     _fix_none_address,
     _normalize_salary,
     _remove_html_tags,
+    _split_address,
     clean_job_data,
 )
 from langchain_core.tools import BaseTool
@@ -182,3 +183,102 @@ class TestCleanJobData:
     async def test_is_tool_instance(self):
         assert isinstance(clean_job_data, BaseTool)
         assert clean_job_data.name == "clean_job_data"
+
+
+class TestSalaryBareWanIsMonthly:
+    """B1（2026-10-03 用户拍板）：**裸 `X-Y万` 按月薪**（×10000，**不 ÷12**）。
+
+    旧实现（13 条正则）把带 `万` 的范围一律当年薪 ÷12 —— 实测让真实 524 行表里
+    **70 行薪资错 12 倍**（`1.2-1.3万` → `1000-1083`，真实应为 `12000-13000`）。
+    更糟的是质检模型会自己发现这个矛盾（实测「薪资信息」只给 10~40 分）并把整行
+    从 B 压成 C —— 所以这不只是数据准确性问题，而是画像质量问题。
+    """
+
+    def test_bare_wan_is_monthly(self):
+        assert _normalize_salary("1.2-1.3万") == "12000-13000"
+        assert _normalize_salary("1-2万") == "10000-20000"
+        assert _normalize_salary("1-1.5万") == "10000-15000"
+        assert _normalize_salary("1.6-2.4万") == "16000-24000"
+
+    def test_wan_on_both_sides_of_separator(self):
+        """`20万-30万/年` 两侧都带「万」——旧实现必须专门写一条正则，漏一条就整类失配。"""
+        assert _normalize_salary("20万-30万/年") == "16667-25000"
+
+    def test_explicit_yearly_still_divides_by_12(self):
+        assert _normalize_salary("24万/年") == "20000"
+        assert _normalize_salary("20-30万/年") == "16667-25000"
+
+    def test_n_months_factor(self):
+        """`·N薪` 按 N/12 折算（用户 2026-10-03 拍板）。"""
+        assert _normalize_salary("2-4万·14薪") == "23333-46667"
+        assert _normalize_salary("4000-5000元·13薪") == "4333-5417"
+
+    def test_plain_yuan_monthly_unchanged(self):
+        assert _normalize_salary("9000-15000元") == "9000-15000"
+        assert _normalize_salary("15000-25000元/月") == "15000-25000"
+
+    def test_daily_yuan_times_22(self):
+        assert _normalize_salary("100-150元/天") == "2200-3300"
+
+
+class TestSplitAddress:
+    """B1（2026-10-03）：`地址` 是「城市-区县」，且区县可能是字面 `None`。
+
+    实测真实表里 **17 行**形如 `常德-None`：`None` 是导出工具留下的字面字符串，不是区县。
+    原样保留会让城市变成 `常德-None`，与地域下拉选项永远对不上。
+    """
+
+    def test_splits_city_and_district(self):
+        assert _split_address("上海-杨浦区") == ("上海", "杨浦区")
+        assert _split_address("南京-鼓楼区") == ("南京", "鼓楼区")
+
+    def test_drops_literal_none_district(self):
+        assert _split_address("常德-None") == ("常德", None)
+        assert _split_address("杭州-None") == ("杭州", None)
+        assert _split_address("北京-None") == ("北京", None)
+
+    def test_drops_placeholder_district(self):
+        assert _split_address("上海-未知") == ("上海", None)
+
+    def test_bare_city_unchanged(self):
+        assert _split_address("北京") == ("北京", None)
+
+    def test_none_and_placeholder_inputs(self):
+        assert _split_address(None) == (None, None)
+        assert _split_address("") == (None, None)
+        assert _split_address("None") == (None, None)
+        assert _split_address("nan") == (None, None)
+
+
+class TestCleanJobDataAddressAndSalaryRaw:
+    """B1：地址规范化 + **薪资原文保留**在 `clean_job_data` 里的端到端行为。"""
+
+    @pytest.mark.asyncio
+    async def test_address_cleaned_and_salary_raw_kept(self):
+        rows = [{"title": "Java", "city": "常德-None", "salary": "1.2-1.3万"}]
+        result = await clean_job_data.ainvoke({"rows": rows})
+        row = result["cleaned_rows"][0]
+
+        assert row["city"] == "常德"  # 纯城市名，不含 `-None`
+        assert row["salary"] == "12000-13000"  # 主值 = 折算后月薪
+        assert row["salary_raw"] == "1.2-1.3万"  # 原文保留（用户要求）
+        assert result["stats"]["city_cleaned"] == 1
+        assert result["stats"]["city_fixed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_district_extracted_separately(self):
+        rows = [{"title": "Java", "city": "上海-杨浦区"}]
+        result = await clean_job_data.ainvoke({"rows": rows})
+        row = result["cleaned_rows"][0]
+
+        assert row["city"] == "上海"
+        assert row["district"] == "杨浦区"
+        assert result["stats"]["district_extracted"] == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_city_still_becomes_unknown(self):
+        rows = [{"title": "Java", "city": None}]
+        result = await clean_job_data.ainvoke({"rows": rows})
+
+        assert result["cleaned_rows"][0]["city"] == "未知"
+        assert result["stats"]["city_fixed"] == 1

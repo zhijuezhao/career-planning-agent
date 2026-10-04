@@ -64,37 +64,102 @@ INDUSTRY_NORMALISATION: dict[str, str] = {
     "环保": "能源/化工",
 }
 
-# Regex patterns for salary parsing.
-# Order matters: more specific patterns (with explicit unit indicators) come first.
-SALARY_PATTERNS = [
-    # 年薪: 20万-30万/年, 20-30万/年, 200000-300000/年
-    (re.compile(r"(\d+[\d.]*)\s*[万wW]\s*[-~—至]\s*(\d+[\d.]*)\s*[万wW]?\s*[/年]*", re.UNICODE), "yearly", 1.0),
-    (re.compile(r"(\d+[\d.]*)\s*[-~—至]\s*(\d+[\d.]*)\s*[万wW]\s*[/年]*", re.UNICODE), "yearly", 1.0),
-    # 年薪 single: 20万/年, 200000/年 (requires at least 万 or /年 indicator)
-    (re.compile(r"(\d+[\d.]*)\s*[万wW]\s*[/年]*$", re.UNICODE), "yearly_single", 1.0),
-    (re.compile(r"(\d+[\d.]*)\s*[/年]$", re.UNICODE), "yearly_single", 1.0),
-    # 日薪: 500-800元/天 (must come before generic monthly)
-    (re.compile(r"(\d+[\d.]*)\s*[-~—至]\s*(\d+[\d.]*)\s*元?/天", re.UNICODE), "daily", 22.0),
-    (re.compile(r"(\d+[\d.]*)\s*元?/天", re.UNICODE), "daily_single", 22.0),
-    # 时薪: 50-80元/时 (must come before generic monthly)
-    (re.compile(r"(\d+[\d.]*)\s*[-~—至]\s*(\d+[\d.]*)\s*元?/时", re.UNICODE), "hourly", 176.0),
-    (re.compile(r"(\d+[\d.]*)\s*元?/时", re.UNICODE), "hourly_single", 176.0),
-    # 月薪: 10K-15K, 10-15K
-    (re.compile(r"(\d+[\d.]*)\s*[kK]\s*[-~—至]\s*(\d+[\d.]*)\s*[kK]?", re.UNICODE), "monthly_k", 1000.0),
-    (re.compile(r"(\d+[\d.]*)\s*[-~—至]\s*(\d+[\d.]*)\s*[kK]\s*[/月]*", re.UNICODE), "monthly_k", 1000.0),
-    # 月薪 with /月 indicator: 15000-25000元/月
-    (re.compile(r"(\d+[\d.]*)\s*[-~—至]\s*(\d+[\d.]*)\s*[/月]", re.UNICODE), "monthly", 1.0),
-    # 月薪 single with /月: 15000元/月, 10K/月
-    (re.compile(r"(\d+[\d.]*)\s*[kK]?\s*[/月]", re.UNICODE), "monthly_single", 1.0),
-    # Fallback: bare number range (no unit indicator, assumed monthly)
-    (re.compile(r"(\d+[\d.]*)\s*[-~—至]\s*(\d+[\d.]*)", re.UNICODE), "monthly", 1.0),
-    # Fallback: bare single number
-    (re.compile(r"(\d+[\d.]*)$", re.UNICODE), "monthly_single", 1.0),
-]
+# ── 薪资归一化（2026-10-03 用户拍板重写）─────────────────────────────────────
+#
+# 规则（按优先级）：
+#   1. 空 / `面议`                    → None
+#   2. 单位倍数：`万` ×10000，`K/k` ×1000，否则 ×1
+#   3. 周期倍数：`/天` ×22，`/时` ×176，否则 ×1
+#   4. `N薪` → ×(N/12)
+#   5. **显式年化**（出现 `年薪` / `/年` / `每年`）→ ÷12
+#
+# ⚠️ 裸 `X-Y万` **按月薪**处理（×10000，**不 ÷12**）。
+#    旧实现（13 条正则）把带 `万` 的范围一律当年薪 ÷12 —— 实测让这份 524 行表里
+#    **70 行薪资错 12 倍**（`1.2-1.3万` → `1000-1083`，真实应为 `12000-13000`）。
+#    更糟的是质检模型会自己发现这个矛盾并据此扣分（实测「薪资信息」只给 10~40 分），
+#    把本该 B 级的行压成 C 级 —— 所以这不只是数据准确性问题，而是画像质量问题。
+#
+# 为什么改成「先剥单位字符、再取数字」而不是继续堆正则：
+#    旧写法对 `20万-30万/年`（两侧都带「万」）必须专门写一条正则，漏一条就整类失配。
+#    先把 `万/K/元` 从待解析文本里去掉、只留纯数字区间，单位由**独立判定**得到，
+#    组合数是 3（单位）× 3（周期）× 显式年化，而不是 13 条互斥正则。
+_DAILY_FACTOR = 22.0  # 月工作日
+_HOURLY_FACTOR = 176.0  # 月工时
+_WAN_MULTIPLIER = 10000.0
+_K_MULTIPLIER = 1000.0
 
-# K-suffix multiplier for single values
-K_MULTIPLIER = 1000.0
-WAN_MULTIPLIER = 10000.0
+#: 显式年化的标志（只有这些才 ÷12）
+_YEARLY_HINT = re.compile(r"年薪|每年|/\s*年|年\s*薪")
+#: `13薪` / `14薪` 的月数
+_MONTHS_HINT = re.compile(r"(\d+)\s*薪")
+#: 数字区间（分隔符覆盖 - ~ — 至 到）
+_NUM_RANGE = re.compile(r"(\d+(?:\.\d+)?)\s*[-~—至到]\s*(\d+(?:\.\d+)?)")
+#: 单个数字
+_NUM_SINGLE = re.compile(r"(\d+(?:\.\d+)?)")
+#: 取数字前要剥掉的单位字符（`万`/`元`/`K` 由独立判定处理）
+_UNIT_CHARS = str.maketrans("", "", "万元kK ")
+
+
+def _normalize_salary(salary_str: str | None) -> str | None:
+    """把薪资文本归一化成**月薪区间** `"min-max"`（单值时只给一个数）。
+
+    返回 ``None`` 表示「没有可用薪资」（空值或 `面议`）；无法解析的原文**原样返回**
+    （宁保留原文让人看见，也不要丢掉）。
+
+    规则见模块内 `_normalize_salary` 上方的注释块。
+    """
+    if not salary_str or str(salary_str).strip() in ("", "None", "nan", "无"):
+        return None
+
+    text = str(salary_str).strip()
+
+    # 1) 薪资面议 → 视为没有薪资
+    if "面议" in text:
+        return None
+
+    # 2) 单位倍数
+    if "万" in text:
+        scale = _WAN_MULTIPLIER
+    elif re.search(r"\d\s*[kK]", text):
+        scale = _K_MULTIPLIER
+    else:
+        scale = 1.0
+
+    # 3) 周期倍数
+    if "天" in text:
+        period = _DAILY_FACTOR
+    elif "时" in text:
+        period = _HOURLY_FACTOR
+    else:
+        period = 1.0
+
+    # 4) N 薪（月数折算）
+    months = 1.0
+    months_match = _MONTHS_HINT.search(text)
+    if months_match:
+        months = float(months_match.group(1)) / 12.0
+
+    # 5) 显式年化才 ÷12
+    year_div = 12.0 if _YEARLY_HINT.search(text) else 1.0
+
+    # 剥掉单位字符后取数字（这样 `20万-30万/年` 与 `20-30万/年` 走同一条路径）
+    numeric = text.translate(_UNIT_CHARS)
+
+    rng = _NUM_RANGE.search(numeric)
+    if rng:
+        low = float(rng.group(1)) * scale * period * months / year_div
+        high = float(rng.group(2)) * scale * period * months / year_div
+    else:
+        single = _NUM_SINGLE.search(numeric)
+        if not single:
+            return text  # 解析不了 → 原样保留
+        low = high = float(single.group(1)) * scale * period * months / year_div
+
+    low_i, high_i = round(low), round(high)
+    if low_i > high_i:  # 写反了（`10K-8K`）→ 换回来
+        low_i, high_i = high_i, low_i
+
+    return str(low_i) if low_i == high_i else f"{low_i}-{high_i}"
 
 
 def _remove_html_tags(text: str | None) -> str | None:
@@ -112,6 +177,13 @@ def _fix_none_address(row: dict) -> dict:
     if not row.get("city") or str(row["city"]).strip() in ("", "None", "nan", "无"):
         row["city"] = "未知"
     return row
+
+
+#: 地址第二段（区县）里的**脏值**：这些不是区县名。
+#: 实测来源：导出工具把空的区县写成字面 `None`（本表 17 行）。
+_ADDRESS_DISTRICT_NOISE = frozenset(
+    {"none", "nan", "null", "无", "未知", "不限", "-", "--", "—", "/", "其他", ""}
+)
 
 
 def _clean_industry(industry: str | None, custom_map: dict[str, str] | None = None) -> str | None:
@@ -145,79 +217,28 @@ def _clean_industry(industry: str | None, custom_map: dict[str, str] | None = No
     return industry
 
 
-def _parse_salary_value(value_str: str) -> float:
-    """Parse a salary value string, handling K and 万 suffixes."""
-    value_str = value_str.strip().upper().replace("K", "").replace("W", "").replace("万", "")
-    try:
-        return float(value_str)
-    except ValueError:
-        return 0.0
+def _split_address(value: object) -> tuple[str | None, str | None]:
+    """把「城市-区县」拆成 ``(城市, 区县)``；脏值段当「没有」。
 
+    实测（2026-10-03）这份 524 行表里 `地址` 有 **17 行**形如 `常德-None` / `杭州-None`：
+    `None` 是导出工具留下的**字面字符串**，不是区县名。原样保留会让城市变成
+    `常德-None`，与地域下拉选项永远对不上（用户要求「输出纯城市名」）。
 
-def _normalize_salary(salary_str: str | None) -> str | None:
-    """Normalise salary string to monthly range format 'min-max'.
-
-    Handles 4 original formats: 月薪, 年薪, 日薪, 时薪.
-    Returns None for unparseable or '面议' values.
+    同时把 `区县` 单独取出来（`job_company_links` 没有区县列，先留在行里，
+    由 B4 的 `payload` 归档；将来要按区县筛选就有现成数据）。
     """
-    if not salary_str or str(salary_str).strip() in ("", "None", "nan", "无"):
-        return None
+    if value is None:
+        return None, None
+    text = " ".join(str(value).split()).strip()
+    if not text or text.lower() in _ADDRESS_DISTRICT_NOISE:
+        return None, None
+    if "-" not in text:
+        return text, None
 
-    salary_str = salary_str.strip()
-
-    # 薪资面议
-    if "面议" in salary_str:
-        return None
-
-    # Try each pattern
-    for pattern, fmt, multiplier in SALARY_PATTERNS:
-        match = pattern.search(salary_str)
-        if not match:
-            continue
-
-        if fmt in ("yearly", "monthly_k", "monthly", "daily", "hourly"):
-            # Range format
-            v1 = _parse_salary_value(match.group(1))
-            v2 = _parse_salary_value(match.group(2))
-            if fmt == "yearly":
-                # 年薪 → convert to monthly
-                min_val = round(v1 * WAN_MULTIPLIER / 12)
-                max_val = round(v2 * WAN_MULTIPLIER / 12)
-            elif fmt == "daily":
-                min_val = round(v1 * multiplier)
-                max_val = round(v2 * multiplier)
-            elif fmt == "hourly":
-                min_val = round(v1 * multiplier)
-                max_val = round(v2 * multiplier)
-            elif fmt == "monthly_k":
-                min_val = round(v1 * multiplier)
-                max_val = round(v2 * multiplier)
-            else:
-                min_val = round(v1)
-                max_val = round(v2)
-
-            if min_val > max_val:
-                min_val, max_val = max_val, min_val
-
-            if min_val == max_val:
-                return str(min_val)
-            return f"{min_val}-{max_val}"
-
-        else:
-            # Single value format
-            v = _parse_salary_value(match.group(1))
-            if fmt == "yearly_single":
-                v = round(v * WAN_MULTIPLIER / 12)
-            elif fmt == "daily_single":
-                v = round(v * multiplier)
-            elif fmt == "hourly_single":
-                v = round(v * multiplier)
-            elif fmt == "monthly_single":
-                v = round(v)  # already monthly
-
-            return str(v)
-
-    return salary_str
+    parts = [p.strip() for p in text.split("-")]
+    city = parts[0] or None
+    district = "-".join(p for p in parts[1:] if p and p.lower() not in _ADDRESS_DISTRICT_NOISE)
+    return city, (district or None)
 
 
 @tool
@@ -245,6 +266,8 @@ async def clean_job_data(
 
     stats = {
         "html_tags_removed": 0,
+        "city_cleaned": 0,  # 地址成功拆出「纯城市名」（可能同时得到区县）
+        "district_extracted": 0,  # 区县有效并已单独取出
         "city_fixed": 0,
         "industry_normalised": 0,
         "salary_normalised": 0,
@@ -276,8 +299,18 @@ async def clean_job_data(
                 if cleaned[field] != original:
                     stats["html_tags_removed"] += 1
 
-        # Fix None address
-        if not cleaned.get("city") or str(cleaned["city"]).strip() in ("", "None", "nan", "无"):
+        # 地址规范化（2026-10-03）：`城市-区县` 拆开、丢掉脏区县（`常德-None` → `常德`）。
+        # 放在「HTML 清洗之后、行业归一之前」，因为它产出 `city` 与 `district` 两个字段。
+        raw_city = cleaned.get("city")
+        city, district = _split_address(raw_city)
+        if city:
+            if str(city) != str(raw_city):
+                stats["city_cleaned"] += 1
+            cleaned["city"] = city
+            if district:
+                cleaned["district"] = district
+                stats["district_extracted"] += 1
+        else:
             cleaned["city"] = "未知"
             stats["city_fixed"] += 1
 
@@ -290,7 +323,7 @@ async def clean_job_data(
                 cleaned[ind_key] = normalised
                 stats["industry_normalised"] += 1
 
-        # Salary normalisation
+        # Salary normalisation（主值 = 折算后的月薪区间）
         if "salary" in cleaned:
             orig_salary = cleaned["salary"]
             normalised = _normalize_salary(orig_salary)
@@ -299,6 +332,11 @@ async def clean_job_data(
             elif normalised != orig_salary:
                 stats["salary_normalised"] += 1
             cleaned["salary"] = normalised
+            # **保留原文**（用户 2026-10-03 拍板：主值 ×N/12、同时保留原始文本）。
+            # `salary` 会被折算值覆盖，原文是审计「折算对不对」的唯一依据
+            # （如 `1.2-1.3万` → `12000-13000` 是否合理、`·13薪` 有没有被算进去）。
+            if orig_salary not in (None, "", "None", "nan"):
+                cleaned["salary_raw"] = orig_salary
 
         cleaned_rows.append(cleaned)
 

@@ -12,7 +12,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.admin import _import_runner
 from app.api.v1.admin.auth import require_admin
-from app.domain.models.import_job import DataImportJob
+from app.config import get_settings
+from app.core.job_agent.slices import (
+    SLICE_SUBDIR,
+    manifest_file_name,
+    sha256_file,
+    write_slices,
+)
+from app.core.job_agent.tools.data_loader import read_raw_table
+from app.domain.models.import_job import (
+    IMPORT_PROCESSABLE_STATUSES,
+    IMPORT_STATUS_AWAITING_CONFIRMATION,
+    IMPORT_STATUS_FAILED,
+    IMPORT_STATUS_PENDING,
+    IMPORT_STATUS_PROCESSING,
+    IMPORT_TERMINAL_STATUSES,
+    DataImportJob,
+)
 from app.domain.models.user import User
 from app.infrastructure.database import async_session_factory, get_db
 from app.schemas.admin import (
@@ -34,6 +50,19 @@ def _find_upload_file(job_id: int) -> Path | None:
     """按 `<job_id>_*` 定位上传文件（S7-1 决策 D-S7-1=A：文件名即索引，无 schema 变更）。"""
     matches = sorted(UPLOAD_DIR.glob(f"{job_id}_*"))
     return matches[0] if matches else None
+
+
+def _slice_batch_id(job_id: int) -> str:
+    return f"job{job_id}"
+
+
+def _slice_dir(job_id: int) -> Path:
+    """切片目录：`uploads/import/slices/job<id>/`。
+
+    放子目录的原因：`_find_upload_file()` 用 `<job_id>_*` 匹配原文件，
+    子目录不会被它误匹配成一个"上传文件"。
+    """
+    return UPLOAD_DIR / SLICE_SUBDIR / _slice_batch_id(job_id)
 
 
 def _schedule_process(job_id: int) -> None:
@@ -86,6 +115,20 @@ async def get_import_job(
     return job
 
 
+def _slice_progress(stats: dict | None) -> dict:
+    """从 `stats.slices` 提取前端要的三个数（第 k/N 片 + 状态 + 警告）。"""
+    slices = (stats or {}).get("slices") or {}
+    if not slices:
+        return {}
+    return {
+        "slice_total": slices.get("slice_count"),
+        "slice_done": len(slices.get("done") or []),
+        "slice_next": slices.get("next"),
+        "slice_state": slices.get("state"),
+        "slice_warning": slices.get("error") or slices.get("warning"),
+    }
+
+
 @router.get("/{job_id}/progress", response_model=ImportProgressResponse)
 async def get_import_progress(
     job_id: int,
@@ -109,6 +152,7 @@ async def get_import_progress(
         success_count=job.success_count,
         error_count=job.error_count,
         progress_pct=progress_pct,
+        **_slice_progress(job.stats),
     )
 
 
@@ -145,10 +189,13 @@ async def stream_import_progress(
                 "success_count": current.success_count,
                 "error_count": current.error_count,
                 "progress_pct": progress_pct,
+                **_slice_progress(current.stats),
             })
             yield f"data: {data}\n\n"
 
-            if current.status in ("completed", "failed"):
+            if current.status in IMPORT_TERMINAL_STATUSES or current.status == IMPORT_STATUS_AWAITING_CONFIRMATION:
+                # B3：`awaiting_confirmation` 也是「本轮到此为止」——
+                # 停在这里让前端把"继续下一片"按钮亮出来，而不是一直挂着 SSE 等。
                 break
             if time.monotonic() > deadline:
                 break
@@ -191,7 +238,7 @@ async def upload_file(
     job = DataImportJob(
         file_name=file.filename,
         file_size=len(content),
-        status="pending",
+        status=IMPORT_STATUS_PENDING,
     )
     db.add(job)
     await db.flush()  # 同事务内取回 id；落盘抛错会随请求回滚，不留孤儿行
@@ -200,7 +247,74 @@ async def upload_file(
     file_path = UPLOAD_DIR / f"{job.id}_{safe_name}"
     file_path.write_bytes(content)
 
+    # B3（2026-10-03）：上传即切片（用户要求"切成好几份、序列号 1、2、3…"）。
+    # 在这里做的好处：① 预检信息（切几片/共多少行/哪列没认出来）能立刻返回；
+    # ② 清单与每片 sha256/行指纹在**处理之前**就固定下来，后面每次处理都从磁盘重算校验，
+    #    能证明"不丢行、不重行、没被改过"。
+    slices_state = await asyncio.to_thread(_build_slices, job.id, file_path, safe_name)
+    job.stats = {**(job.stats or {}), "slices": slices_state}
+
     return job
+
+
+def _build_slices(job_id: int, file_path: Path, source_name: str) -> dict:
+    """读原始表 → 切片 → 写清单；返回可直接塞进 `job.stats["slices"]` 的状态。
+
+    同步实现（由 `asyncio.to_thread` 调用）：pandas 读写是阻塞的，不该占事件循环。
+    """
+    slice_size = get_settings().import_slice_size
+    out_dir = _slice_dir(job_id)
+    batch_id = _slice_batch_id(job_id)
+
+    try:
+        columns, rows = read_raw_table(str(file_path), sheet_name=0)
+    except Exception as exc:  # noqa: BLE001 - 读不动要如实记下来，处理时会失败并说明原因
+        return {
+            "batch_id": batch_id,
+            "total_rows": 0,
+            "slice_size": slice_size,
+            "slice_count": 0,
+            "slices": [],
+            "state": IMPORT_STATUS_FAILED,
+            "next": 1,
+            "done": [],
+            "cumulative": {"rows": 0, "passed": 0, "rejected": 0},
+            "error": f"读取失败：{type(exc).__name__}: {exc}",
+        }
+
+    if not rows:
+        # 空表必须显式记下来：旧实现把「读到 0 行」当成功一路跑完并报 completed，
+        # 用户看到"导入成功"却一条都没有（实测 1480/1481 两个工单）。
+        return {
+            "batch_id": batch_id,
+            "total_rows": 0,
+            "slice_size": slice_size,
+            "slice_count": 0,
+            "slices": [],
+            "state": IMPORT_STATUS_PENDING,
+            "next": 1,
+            "done": [],
+            "cumulative": {"rows": 0, "passed": 0, "rejected": 0},
+            "warning": "该工作表没有任何数据行（可能是空表，或数据不在第一个工作表里）",
+        }
+
+    manifest = write_slices(
+        rows,
+        columns,
+        out_dir=out_dir,
+        batch_id=batch_id,
+        slice_size=slice_size,
+        source_name=source_name,
+        source_sha256=sha256_file(file_path),
+    )
+    return {
+        **manifest,
+        "manifest_file": manifest_file_name(batch_id),
+        "state": IMPORT_STATUS_PENDING,
+        "next": 1,
+        "done": [],
+        "cumulative": {"rows": 0, "passed": 0, "rejected": 0},
+    }
 
 
 @router.post("/{job_id}/process", response_model=ImportJobResponse)
@@ -209,19 +323,34 @@ async def process_import_job(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Start processing an import job."""
+    """开始 / **继续下一片**处理一个导入工单。
+
+    B3（2026-10-03）起这个接口也是「切片暂停闸门」的放行口：
+    状态为 `awaiting_confirmation` 时再点一次就等于"确认，处理下一片"。
+    """
     job = await db.get(DataImportJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Import job not found")
 
-    if job.status not in ("pending", "failed"):
+    if job.status not in IMPORT_PROCESSABLE_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot process job in {job.status} status")
 
-    job.status = "processing"
-    job.processed_rows = 0
-    job.success_count = 0
-    job.error_count = 0
-    job.errors = []
+    slices_state = (job.stats or {}).get("slices") or {}
+    if slices_state and not slices_state.get("slice_count"):
+        # 空表/读取失败的工单：明确报错，不再"假成功"
+        detail = slices_state.get("error") or slices_state.get("warning") or "该文件没有可处理的数据行"
+        raise HTTPException(status_code=400, detail=detail)
+
+    # ⚠️ 只在**第一片**重置计数。切片续跑时重置会把已完成的进度抹掉，
+    # 而 `_finish_slice` 的累计值是从 `stats.slices.cumulative` 读的，两者必须一致。
+    is_first_run = not slices_state or int(slices_state.get("next") or 1) <= 1
+    if is_first_run:
+        job.processed_rows = 0
+        job.success_count = 0
+        job.error_count = 0
+        job.errors = []
+
+    job.status = IMPORT_STATUS_PROCESSING
     # S7-1：必须【先 commit 再起任务】。后台任务开独立 session，未提交它就看不到
     # processing（原实现只 flush 就 create_task，存在竞态，任务结束还可能把状态覆盖回去）。
     await db.commit()
@@ -240,6 +369,9 @@ async def _process_import(job_id: int) -> None:
 
     S7-3 起真正的执行逻辑在 :mod:`app.api.v1.admin._import_runner`
     （6 阶段流水线、阶段级进度、计数映射、失败落库）。
-    本函数只负责「把 API 层的上传目录约定翻译成一个 Path」。
+    B3 起还要把**切片目录约定**翻译成一个 Path 传进去（切片模式下只跑下一片）。
+    本函数只负责「把 API 层的上传目录约定翻译成 Path」。
     """
-    await _import_runner.run_import_job(job_id, _find_upload_file(job_id))
+    await _import_runner.run_import_job(
+        job_id, _find_upload_file(job_id), slice_dir=_slice_dir(job_id)
+    )

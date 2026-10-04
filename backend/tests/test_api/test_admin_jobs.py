@@ -236,6 +236,59 @@ class TestJobsAPI:
         assert ok.status_code == 200, ok.text
         assert ok.json()["level"] == "高级"
 
+    def test_same_title_different_level_is_allowed(self, admin_token: str, client: TestClient):
+        """B4（2026-10-03）：同名**不同等级**是两条合法画像。
+
+        唯一键从 `(title_key)` 变成 `(title_key, level)`，所以管理端必须能为同一个
+        岗位名分别建 初级/中级/高级。这条校验若还只看岗位名，就会把"新建高级岗"
+        误判成 409（B4 引入、2026-10-04 修复）。
+        """
+        title = f"测试岗位_分等级_{_ts}"
+        headers = {"Authorization": f"Bearer {admin_token}"}
+
+        basic = client.post(
+            "/api/v1/admin/jobs", json={"title": title, "level": "初级"}, headers=headers
+        )
+        assert basic.status_code == 201, basic.text
+
+        senior = client.post(
+            "/api/v1/admin/jobs", json={"title": title, "level": "高级"}, headers=headers
+        )
+        assert senior.status_code == 201, senior.text
+        assert basic.json()["id"] != senior.json()["id"]
+
+        # 同名**同等级**才是重复
+        dup = client.post(
+            "/api/v1/admin/jobs", json={"title": title, "level": "高级"}, headers=headers
+        )
+        assert dup.status_code == 409, dup.text
+        assert "高级" in dup.json()["detail"]
+
+    def test_create_without_level_defaults_to_unlimited(self, admin_token: str, client: TestClient):
+        """不传等级 → 「不限」（`level` 列 NOT NULL + 默认值）。
+
+        修复前（B4 引入）：`level=None` 被显式插成 NULL → 违反 NOT NULL →
+        **被误报成"岗位已存在（同名，并发写入）"**，与真实原因完全不符；
+        连"不填等级新建岗位"这个最基本的操作都做不了。
+        """
+        resp = client.post(
+            "/api/v1/admin/jobs",
+            json={"title": f"测试岗位_无等级_{_ts}"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["level"] == "不限"
+
+    def test_free_text_level_is_normalised_on_write(self, admin_token: str, client: TestClient):
+        """自由文本等级收敛到「不限」—— 否则唯一键里会长出无限个档位。"""
+        resp = client.post(
+            "/api/v1/admin/jobs",
+            json={"title": f"测试岗位_怪等级_{_ts}", "level": "3-5年经验"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["level"] == "不限"
+
 
 # ── 任务 4（2026-09-27）：岗位的地域筛选（**招聘所在地**口径，缺失回落公司）────────
 

@@ -344,6 +344,82 @@ COLUMN_SPECS: tuple[ColumnSpec, ...] = (
         "source_url",
         "ALTER TABLE job_company_links ADD COLUMN IF NOT EXISTS source_url TEXT",
     ),
+    # ── B4（2026-10-03）：分等级画像需要的三列 ─────────────────────────────────
+    # 1) 薪资统计：主值区间（包络）+ 中位数区间 + 原始文本 + 条数。
+    #    用户明确要求「两者都存」；`job_profiles.salary_range` 是 String(50) 存不下两份。
+    ColumnSpec(
+        "job_profiles",
+        "salary_stats",
+        "ALTER TABLE job_profiles ADD COLUMN IF NOT EXISTS salary_stats JSONB",
+    ),
+    # 2) 岗位综合画像卡（LLM 产物）：落库才可审计 —— 综合得对不对、丢了什么
+    #    （`excluded_noise`）、模型对等级初判的异议（`level_objections`）都在这。
+    #    同时存提示词版本与生成时间，便于"只重跑聚合"时对比。
+    ColumnSpec(
+        "job_profiles",
+        "aggregate_card",
+        "ALTER TABLE job_profiles ADD COLUMN IF NOT EXISTS aggregate_card JSONB",
+    ),
+    # 3) 原始行全量 + 抽取结果。**聚合阶段的数据来源**：`job_raw_data` 原本只有
+    #    title/company/city/salary/... 十列，抽取器的 hard_skills / soft_skills /
+    #    education_requirement / experience_requirement / level 与原始表的
+    #    岗位编码 / 地址区县 / 公司类型 / 公司详情 / 更新日期**都没有列可放**，
+    #    逐行 upsert 时就被丢掉了 —— 没地方读，聚合阶段就无从"综合"。
+    ColumnSpec(
+        "job_raw_data",
+        "payload",
+        "ALTER TABLE job_raw_data ADD COLUMN IF NOT EXISTS payload JSONB",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class AlterSpec:
+    """**幂等变更**（列类型加宽 / 改默认值）。
+
+    为什么单独一类：`COLUMN_SPECS` 走 `_ensure`，**对象已存在就跳过** ——
+    而 `ALTER COLUMN` 的对象一定已存在，放那边会被永远跳过（静默不生效）。
+    """
+
+    table: str
+    name: str
+    sql: str
+
+
+#: 幂等变更清单（每次执行；语句本身可重复运行）
+ALTER_SPECS: tuple[AlterSpec, ...] = (
+    # B3（2026-10-03）：切片暂停闸门的状态值 `awaiting_confirmation` 有 **21 个字符**，
+    # 而 `data_import_jobs.status` 建表时是 `VARCHAR(20)`（见 alembic `a1b2c3d4e5f6`）。
+    # 不加宽的话，第一片跑完写状态就会 `value too long for type character varying(20)`，
+    # 而且**恰好发生在最关键的"暂停等确认"那一步**。
+    AlterSpec(
+        "data_import_jobs",
+        "status",
+        "ALTER TABLE data_import_jobs ALTER COLUMN status TYPE VARCHAR(32)",
+    ),
+    # B4（2026-10-03）：`job_profiles.level` 必须 **NOT NULL**。
+    # 理由：岗位唯一键变成了 `(title_key, level)`，而 PostgreSQL 唯一索引里
+    # **NULL 互不相等** —— 可空的话两条 `level = NULL` 的同名岗位不会冲突，
+    # 于是"分等级画像"又会写出重复行（P2 时代在 `(title, null)` 上踩过同一个坑）。
+    #
+    # 三步**必须按序**：① 先设默认值（新插入的行自动填 `不限`）
+    #                 ② 回填历史 NULL（否则 SET NOT NULL 会直接失败）
+    #                 ③ 再置 NOT NULL
+    AlterSpec(
+        "job_profiles",
+        "level_default",
+        "ALTER TABLE job_profiles ALTER COLUMN level SET DEFAULT '不限'",
+    ),
+    AlterSpec(
+        "job_profiles",
+        "level_backfill",
+        "UPDATE job_profiles SET level = '不限' WHERE level IS NULL",
+    ),
+    AlterSpec(
+        "job_profiles",
+        "level_not_null",
+        "ALTER TABLE job_profiles ALTER COLUMN level SET NOT NULL",
+    ),
 )
 
 CONSTRAINT_SPECS: tuple[ConstraintSpec, ...] = (
@@ -383,27 +459,34 @@ INDEX_SPECS: tuple[IndexSpec, ...] = (
         "ix_job_company_links_company_id",
         "CREATE INDEX IF NOT EXISTS ix_job_company_links_company_id ON job_company_links (company_id)",
     ),
-    # 任务 3（2026-09-27）：岗位唯一键回到**单键 `(title_key)`**。
-    # P2 的 `(title_key, company_id) NULLS NOT DISTINCT` 是为了"同名不同公司各留一条岗位"，
-    # 而多对多模型下"同名不同公司"是**关联表上的多条记录**（岗位只有一条）→ 公司维度从
-    # 去重键里消失。副作用（好事）：`company_id` 被 FK 置 NULL 时不再可能撞出
-    # `duplicate key ... (title, null)`（那个"删第二家公司必 500"的隐患从结构上消失）。
+    # B4（2026-10-03）：岗位唯一键加上**等级** —— 「岗位名 × 等级」各一条画像。
+    #
+    # 为什么必须改（用户 2026-10-03 拍板，见 B4 方案）：原来只有 `(title_key)`，
+    # 一个岗位名只能有一条画像；而新方案是"综合出岗位信息后按规则划分出
+    # 初级/中级/高级"，**三份画像无处可放**（第二份就会撞唯一键被当成 update 覆盖）。
+    #
+    # ⚠️ 前置条件：`level` 必须已经 **NOT NULL**（见上面 `ALTER_SPECS` 的三步）。
+    # 两者的执行顺序在本脚本里天然成立：删除清单 → 建表/加列 → ALTER → 建索引。
     IndexSpec(
-        "uq_job_profiles_title_key",
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_job_profiles_title_key "
-        "ON job_profiles (title_key)",
+        "uq_job_profiles_title_level",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_job_profiles_title_level "
+        "ON job_profiles (title_key, level)",
     ),
 )
 
-#: 建索引前要先确认没有"归一化后重名"的岗位（否则 PG 的报错不会告诉你是哪几个名字）。
-_TITLE_KEY_INDEX = "uq_job_profiles_title_key"
+#: 建索引前要先确认没有"归一化后重名"的岗位（否则 PG 的报错不会告诉你是哪几个）。
+#: B4 起重名的判定粒度跟着唯一键一起变成 `(title_key, level)`。
+_PROFILE_UNIQUE_INDEX = "uq_job_profiles_title_level"
 
 # ── 删除清单（任务 3）：先索引/外键、后列 ──────────────────────────────────────────────
 # 顺序有意为之：列上还挂着索引/外键时 PostgreSQL 会**连带删除**它们（隐式 CASCADE），
 # 显式按"依赖方 → 被依赖方"写出来，日志能如实反映每一步、也不依赖隐式行为。
 DROP_INDEX_SPECS: tuple[DropIndexSpec, ...] = (
-    # P2 的岗位唯一键（被下面的 `(title_key)` 单键取代）
+    # P2 的岗位唯一键（被 `(title_key)` 单键取代）
     DropIndexSpec("uq_job_profiles_title_company"),
+    # B4：任务 3 的单键唯一索引（被 `(title_key, level)` 取代）。
+    # 不删的话两条索引同时存在，旧的那条会把"同名不同等级"的第二条画像顶回去。
+    DropIndexSpec("uq_job_profiles_title_key"),
     # `company_id` 列上的普通索引（反正随后整列都会没）
     DropIndexSpec("ix_job_profiles_company_id"),
 )
@@ -465,21 +548,24 @@ async def _index_exists(conn: AsyncConnection, name: str) -> bool:
     )
 
 
-async def _duplicate_title_keys(conn: AsyncConnection) -> list[tuple[str, int]]:
-    """归一化后重名的岗位名（`(title_key, 条数)`，最多 20 条）。
+async def _duplicate_title_keys(conn: AsyncConnection) -> list[tuple[str, str, int]]:
+    """归一化后重名的 `(title_key, level, 条数)`（最多 20 条）。
 
-    只用于**建 `(title_key)` 唯一索引之前**的预检：PG 原生报错是
+    只用于**建 `(title_key, level)` 唯一索引之前**的预检：PG 原生报错是
     `could not create unique index ... duplicate key value violates unique constraint`，
     既不说哪几个岗位名撞了、也不说撞了几条 → 现场只能自己再查一遍。
+
+    ⚠️ B4 起粒度跟着唯一键一起变成 `(title_key, level)`：`title_key` 单独重复
+    是**正常**的（同名不同等级本来就是三条画像），只有 `(title_key, level)` 重复才是问题。
     """
     rows = await conn.execute(
         text(
-            "SELECT title_key, count(*) AS n FROM job_profiles "
-            "WHERE title_key IS NOT NULL GROUP BY title_key HAVING count(*) > 1 "
-            "ORDER BY n DESC, title_key ASC LIMIT 20"
+            "SELECT title_key, coalesce(level, '不限') AS lv, count(*) AS n FROM job_profiles "
+            "WHERE title_key IS NOT NULL GROUP BY title_key, coalesce(level, '不限') "
+            "HAVING count(*) > 1 ORDER BY n DESC, title_key ASC LIMIT 20"
         )
     )
-    return [(row[0], row[1]) for row in rows.all()]
+    return [(row[0], row[1], row[2]) for row in rows.all()]
 
 
 # --------------------------------------------------------------------------------------
@@ -498,6 +584,8 @@ class StepResult:
     already_gone: list[str] = field(default_factory=list)
     #: dry-run 下待删的对象
     drop_planned: list[str] = field(default_factory=list)
+    #: 本次执行的幂等变更（B3 起：列类型加宽等）
+    altered: list[str] = field(default_factory=list)
 
 
 async def _ensure(
@@ -521,6 +609,30 @@ async def _ensure(
     await conn.execute(text(sql))
     result.created.append(label)
     print(f"[CREATE] {label}", flush=True)
+
+
+async def _alter(
+    conn: AsyncConnection,
+    kind: str,
+    target: str,
+    sql: str,
+    dry_run: bool,
+    result: StepResult,
+) -> None:
+    """执行**幂等变更**（列类型加宽等）。
+
+    与 `_ensure` 的关键区别：`_ensure` 在对象**已存在**时直接跳过，而 `ALTER COLUMN`
+    作用的对象必然已存在 —— 塞进 `COLUMN_SPECS` 会被永远跳过、静默不生效。
+    这类语句本身幂等（重复设成同一类型是空操作），所以每次执行；dry-run 只登记。
+    """
+    label = f"{kind} {target}"
+    if dry_run:
+        result.planned.append(label)
+        print(f"[PLAN]   {label}", flush=True)
+        return
+    await conn.execute(text(sql))
+    result.altered.append(label)
+    print(f"[ALTER]  {label}", flush=True)
 
 
 async def _drop(
@@ -582,24 +694,25 @@ async def _apply_all(conn: AsyncConnection, dry_run: bool) -> StepResult:
             result,
         )
 
-    # ── ② 建 `(title_key)` 唯一索引之前先预检重名（PG 原生报错说不出是哪几个岗位名）。
+    # ── ② 建 `(title_key, level)` 唯一索引之前先预检重名
+    #    （PG 原生报错说不出是哪几个岗位名 + 等级）。
     #    表都不存在时（全新库）跳过：那时的报错由后续步骤自然给出。
     if await _table_exists(conn, "job_profiles") and not await _index_exists(
-        conn, _TITLE_KEY_INDEX
+        conn, _PROFILE_UNIQUE_INDEX
     ):
         duplicates = await _duplicate_title_keys(conn)
         if duplicates:
-            detail = "、".join(f"{key!r}×{count}" for key, count in duplicates)
+            detail = "、".join(f"{key!r}/{lv}×{count}" for key, lv, count in duplicates)
             if dry_run:
                 print(
-                    f"[WARN]   job_profiles 存在归一化后重名的岗位，创建 {_TITLE_KEY_INDEX} 会失败："
-                    f"{detail}",
+                    f"[WARN]   job_profiles 存在 (岗位名, 等级) 重复的行，"
+                    f"创建 {_PROFILE_UNIQUE_INDEX} 会失败：{detail}",
                     flush=True,
                 )
             else:
                 raise RuntimeError(
-                    f"无法把岗位唯一键换成 (title_key)：存在归一化后重名的岗位 —— {detail}"
-                    "（先把这些岗位合并成一条，再重跑本脚本）"
+                    f"无法把岗位唯一键换成 (title_key, level)：存在重复的 (岗位名, 等级) —— "
+                    f"{detail}（先把这些行合并，再重跑本脚本）"
                 )
 
     # ── ③ 再建（原有语义不变）
@@ -617,6 +730,9 @@ async def _apply_all(conn: AsyncConnection, dry_run: bool) -> StepResult:
             dry_run,
             result,
         )
+    for spec in ALTER_SPECS:
+        # 幂等变更：无条件执行（对象必然已存在，`_ensure` 会跳过）
+        await _alter(conn, "alter", f"{spec.table}.{spec.name}", spec.sql, dry_run, result)
     for spec in CONSTRAINT_SPECS:
         await _ensure(
             conn,
@@ -674,6 +790,7 @@ async def apply_ddl(database_url: str, dry_run: bool) -> int:
     total = (
         len(TABLE_SPECS)
         + len(COLUMN_SPECS)
+        + len(ALTER_SPECS)
         + len(CONSTRAINT_SPECS)
         + len(INDEX_SPECS)
         + len(DROP_INDEX_SPECS)
@@ -700,13 +817,15 @@ async def apply_ddl(database_url: str, dry_run: bool) -> int:
             if remaining:
                 raise RuntimeError("自检失败，以下对象应删未删：" + "、".join(remaining))
             print(
-                f"[SUMMARY] created={len(result.created)} dropped={len(result.dropped)} "
+                f"[SUMMARY] created={len(result.created)} altered={len(result.altered)} "
+                f"dropped={len(result.dropped)} "
                 f"already_gone={len(result.already_gone)} skipped={len(result.skipped)} "
                 f"(total={total})",
                 flush=True,
             )
             print(
                 f"[VERIFY] 创建侧齐备：{len(TABLE_SPECS)} 表 + {len(COLUMN_SPECS)} 列 + "
+                f"{len(ALTER_SPECS)} 幂等变更 + "
                 f"{len(CONSTRAINT_SPECS)} 外键 + {len(INDEX_SPECS)} 索引；"
                 f"删除侧已生效：{len(DROP_COLUMN_SPECS)} 列 + {len(DROP_CONSTRAINT_SPECS)} 外键 + "
                 f"{len(DROP_INDEX_SPECS)} 索引",

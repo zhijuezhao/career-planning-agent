@@ -135,6 +135,26 @@ def _process(client: TestClient, token: str, job_id: int):
     )
 
 
+def _strip_slices(job_id: int) -> None:
+    """抹掉工单的切片清单 → 把工单变回**整表模式**。
+
+    为什么需要：B3（2026-10-03）起「**上传即切片**」，于是每个新工单都有清单，
+    `runner` 一律走切片分支 —— 而切片分支的 `total_rows` 来自 **manifest**
+    （`_finish_slice` 按整表行数归位），会盖掉流水线自报的 `total_input`。
+    断言「整表模式计数语义」或「读原始上传文件」的老用例必须先把清单摘掉，
+    否则测的就不是它要测的东西（这是 B3 上线时漏改 4 个用例的根因）。
+    """
+    async def _strip() -> None:
+        async with _probe_session_factory() as session:
+            row = await session.get(DataImportJob, job_id)
+            stats = dict(row.stats or {})
+            stats.pop("slices", None)
+            row.stats = stats
+            await session.commit()
+
+    asyncio.run(_strip())
+
+
 THREE_ROW_CSV = (
     "岗位名称,公司名称,工作城市\n"
     "数据分析师,A公司,北京\n"
@@ -408,8 +428,13 @@ class TestImportS71StateMachine:
     def test_runner_fails_when_upload_file_missing(
         self, admin_token: str, client: TestClient, monkeypatch
     ):
-        """反例：文件被删 → failed 且 errors 有内容（不再静默成功）。"""
+        """反例：文件被删 → failed 且 errors 有内容（不再静默成功）。
+
+        必须先 `_strip_slices`：B3 起上传即切片，runner 读的是**切片文件**，
+        删原始上传文件不再影响它 —— 只有整表模式才走"定位原始上传文件"这条路。
+        """
         job_id = _upload(client, admin_token, "s71_missing.csv", THREE_ROW_CSV).json()["id"]
+        _strip_slices(job_id)
         self._start_job_without_scheduling(client, admin_token, job_id, monkeypatch)
 
         path = import_module._find_upload_file(job_id)
@@ -576,9 +601,16 @@ STAGES_TWO_ROWS: list[tuple[str, object]] = [
 class TestImportS73StageProgress:
     """S7-3：假图驱动 —— 阶段进度/计数逐阶段落库（零 LLM、零网络）。"""
 
-    def _run_with_graph(self, client, token, monkeypatch, make_graph):
-        """上传 → process → 把 runner 的图与 session 工厂换成测试替身 → 跑 runner。"""
+    def _run_with_graph(self, client, token, monkeypatch, make_graph, *, whole_table: bool = False):
+        """上传 → process → 把 runner 的图与 session 工厂换成测试替身 → 跑 runner。
+
+        ``whole_table=True`` 时先摘掉切片清单：本类里断言"整表模式计数语义"的用例
+        （`total_rows` 来自流水线 `total_input`）必须走整表模式，否则切片清单里的
+        整表行数会盖掉流水线自报的计数。见 `_strip_slices`。
+        """
         job_id = _upload(client, token, "s73_stage.csv", THREE_ROW_CSV).json()["id"]
+        if whole_table:
+            _strip_slices(job_id)
         assert _process(client, token, job_id).status_code == 200
         monkeypatch.setattr(_import_runner, "async_session_factory", _probe_session_factory)
         graph = make_graph(job_id)
@@ -587,14 +619,44 @@ class TestImportS73StageProgress:
         return job_id, graph
 
     def test_graph_gets_file_path_and_row_cap(self, admin_token, client, monkeypatch):
-        """D-S7-3：行数上限必须真的传到流水线（否则等于没有上限）。"""
+        """D-S7-3 + **B3（2026-10-03）**：切片模式下读的是**该片文件**，且不再套 `nrows` 上限。
+
+        B3 起「上传即切片」（3 行 → 1 片），所以：
+        * `file_path` 指向**切片文件**，不再是原始上传文件；
+        * `nrows = None` —— 片大小本身就是成本闸门；再套一层 `IMPORT_MAX_ROWS`
+          会把尾片二次截断（旧实现 524 行只读前 100 行就是这么来的）。
+        整表模式（没有切片清单的老工单）仍走 `IMPORT_MAX_ROWS`，
+        见 `test_whole_table_mode_still_uses_row_cap`。
+        """
         job_id, graph = self._run_with_graph(
             client, admin_token, monkeypatch, lambda _jid: _FakeGraph(STAGES_TWO_ROWS)
         )
 
         assert graph.payload is not None
-        assert graph.payload["nrows"] == _import_runner.IMPORT_MAX_ROWS
+        assert graph.payload["nrows"] is None
         assert graph.payload["sheet_name"] == 0
+
+        slices = (_job(job_id) or {}).get("stats", {}).get("slices") or {}
+        assert slices.get("slice_count") == 1, "3 行应切出 1 片"
+        expected = import_module._slice_dir(job_id) / slices["slices"][0]["file"]
+        assert expected.exists(), "切片文件应已落盘"
+        assert graph.payload["file_path"] == str(expected)
+
+    def test_whole_table_mode_still_uses_row_cap(self, admin_token, client, monkeypatch):
+        """没有切片清单的工单（B3 之前上传的）仍走整表模式 + `IMPORT_MAX_ROWS`。
+
+        这条是向后兼容的护栏：切片清单是**可选**的，抹掉它不能把老工单弄坏。
+        """
+        job_id = _upload(client, admin_token, "s73_no_slice.csv", THREE_ROW_CSV).json()["id"]
+        _strip_slices(job_id)
+        assert _process(client, admin_token, job_id).status_code == 200
+
+        monkeypatch.setattr(_import_runner, "async_session_factory", _probe_session_factory)
+        graph = _FakeGraph(STAGES_TWO_ROWS)
+        monkeypatch.setattr(_import_runner, "compile_import_pipeline", lambda: graph)
+        asyncio.run(import_module._process_import(job_id))
+
+        assert graph.payload["nrows"] == _import_runner.IMPORT_MAX_ROWS
         expected = import_module._find_upload_file(job_id)
         assert expected is not None
         assert graph.payload["file_path"] == str(expected)
@@ -629,7 +691,9 @@ class TestImportS73StageProgress:
 
             return _FakeGraph(STAGES_TWO_ROWS, on_stage=observe)
 
-        job_id, _graph = self._run_with_graph(client, admin_token, monkeypatch, make_graph)
+        job_id, _graph = self._run_with_graph(
+            client, admin_token, monkeypatch, make_graph, whole_table=True
+        )
 
         assert [o["node"] for o in observed] == [
             "load_data", "clean_data", "dedup", "quality_judge", "extract", "portrait",
@@ -656,13 +720,17 @@ class TestImportS73StageProgress:
         assert final["errors"] == ["低质岗位：D 级（30 分） 描述为空"]
 
     def test_pipeline_exception_marks_job_failed(self, admin_token, client, monkeypatch):
-        """D-S7-6=A：任一阶段失败 → 整单 failed，原因是可见的。"""
+        """D-S7-6=A：任一阶段失败 → 整单 failed，原因是可见的。
+
+        `total == 1` 来自假图的 `total_input`，只有**整表模式**才会被采纳
+        （切片模式的 `total_rows` 取自 manifest）→ 故 `whole_table=True`。
+        """
         stages = [
             ("load_data", {"raw_rows": [_ROW_OK], "total_input": 1, "status": "loaded"}),
             ("clean_data", RuntimeError("流水线炸了")),
         ]
         job_id, _graph = self._run_with_graph(
-            client, admin_token, monkeypatch, lambda _jid: _FakeGraph(stages)
+            client, admin_token, monkeypatch, lambda _jid: _FakeGraph(stages), whole_table=True
         )
 
         final = _job(job_id)
@@ -738,8 +806,12 @@ class TestImportS73RealPipeline:
 
         走真流水线（load_data 真调 pandas/openpyxl），读取在第一个节点就失败，
         因此不会触发任何 LLM 调用。
+
+        B3 起普通上传在**切片阶段**就读出这个错误（见下一条用例），
+        这里先 `_strip_slices` 还原"整表模式的老工单"路径：读不动仍然必须 failed。
         """
         job_id = _upload(client, admin_token, "s73_broken.xlsx", bytes(range(64))).json()["id"]
+        _strip_slices(job_id)
         assert _process(client, admin_token, job_id).status_code == 200
         monkeypatch.setattr(_import_runner, "async_session_factory", _probe_session_factory)
 
@@ -750,3 +822,168 @@ class TestImportS73RealPipeline:
         assert final["status"] == "failed"
         assert final["errors"], "失败原因不能为空"
         assert final["total"] == 0
+
+    def test_unreadable_file_is_rejected_at_upload(self, admin_token, client):
+        """B3 起的**更早**失败：上传即切片时读不动 → `/process` 直接 400，工单不给跑。
+
+        比"跑完再失败"更好：不进入 processing、不消耗任何 LLM 调用，
+        管理员点"开始处理"的那一刻就拿到可读原因（事故 C 的"空读被当成功"再也无法发生）。
+        """
+        resp = _upload(client, admin_token, "b3_broken.xlsx", bytes(range(64)))
+        assert resp.status_code == 201, resp.text
+        job_id = resp.json()["id"]
+
+        slices = (resp.json().get("stats") or {}).get("slices") or {}
+        assert slices.get("slice_count") == 0
+        assert "读取失败" in (slices.get("error") or "")
+
+        blocked = _process(client, admin_token, job_id)
+        assert blocked.status_code == 400, blocked.text
+        assert "读取失败" in blocked.json()["detail"]
+
+        final = _job(job_id)
+        assert final["status"] != "completed", "读不动的文件绝不能显示成功"
+
+
+# ── B3（2026-10-03）切片暂停闸门：端到端 ──────────────────────────────────────
+
+FIVE_ROW_CSV = (
+    "岗位名称,公司名称,岗位编码\n"
+    "Java,A公司,C001\n"
+    "Java,B公司,C002\n"
+    "前端,C公司,C003\n"
+    "前端,D公司,C004\n"
+    "测试,E公司,C005\n"
+).encode()
+
+
+def _slice_stages(rows_in_slice: int) -> list[tuple[str, object]]:
+    """只保留与进度/计数相关的阶段，避免触发 LLM 与真落库。"""
+    return [
+        ("load_data", {"raw_rows": [], "total_input": rows_in_slice, "schema_profile": {}, "status": "loaded"}),
+        ("clean_data", {"cleaned_rows": [], "status": "cleaned"}),
+        ("dedup", {"deduped_rows": [], "dedup_stats": {"input": rows_in_slice}, "status": "deduped"}),
+        (
+            "quality_judge",
+            {
+                "passed_rows": [],
+                "rejected_rows": [],
+                "quality_results": [],
+                "total_passed": rows_in_slice,
+                "total_rejected": 0,
+                "status": "judged",
+            },
+        ),
+        ("persist", {"persist_stats": {}, "status": "completed"}),
+    ]
+
+
+class _TinySliceSettings:
+    """把片大小压到 2，这样 5 行就能切出 3 片（2/2/1），无需造大文件。"""
+
+    import_slice_size = 2
+
+
+class TestImportSliceGateEndToEnd:
+    """用户要求：每一个传输完成后就暂停，等待人工确认后再进行下一个切片。
+
+    5 行 + 片大小 2 → 3 片；每次 `/process` 只放行一片，跑完必须停在
+    `awaiting_confirmation`，最后一片才 `completed`。
+    """
+
+    def _one_slice(self, job_id: int, monkeypatch, rows_in_slice: int) -> None:
+        monkeypatch.setattr(
+            _import_runner, "compile_import_pipeline", lambda: _FakeGraph(_slice_stages(rows_in_slice))
+        )
+        asyncio.run(import_module._process_import(job_id))
+
+    def test_upload_slices_then_pauses_between_slices(self, admin_token, client, monkeypatch):
+        monkeypatch.setattr(import_module, "get_settings", lambda: _TinySliceSettings())
+        job_id = _upload(client, admin_token, "b3_slices.csv", FIVE_ROW_CSV).json()["id"]
+
+        # ① 上传即切片
+        slices = (_job(job_id) or {})["stats"]["slices"]
+        assert slices["total_rows"] == 5
+        assert slices["slice_size"] == 2
+        assert slices["slice_count"] == 3
+        assert slices["next"] == 1
+        assert (import_module._slice_dir(job_id) / slices["slices"][0]["file"]).exists()
+
+        monkeypatch.setattr(_import_runner, "async_session_factory", _probe_session_factory)
+
+        # ② 第 1 片 → 停在等待确认
+        assert _process(client, admin_token, job_id).status_code == 200
+        self._one_slice(job_id, monkeypatch, 2)
+        got = _job(job_id)
+        assert got["status"] == "awaiting_confirmation"
+        assert got["processed"] == 2
+        assert got["total"] == 5
+        assert got["stats"]["slices"]["done"] == [1]
+        assert got["stats"]["slices"]["next"] == 2
+        assert got["stats"]["slices"]["state"] == "awaiting_confirmation"
+
+        # ③ 等待确认时**可以再次 process**（这就是"继续下一片"）
+        assert _process(client, admin_token, job_id).status_code == 200
+        self._one_slice(job_id, monkeypatch, 2)
+        got = _job(job_id)
+        assert got["status"] == "awaiting_confirmation"
+        assert got["processed"] == 4  # 累计，不回退
+        assert got["stats"]["slices"]["done"] == [1, 2]
+        assert got["stats"]["slices"]["cumulative"]["rows"] == 4
+
+        # ④ 最后一片 → completed 且 100%
+        assert _process(client, admin_token, job_id).status_code == 200
+        self._one_slice(job_id, monkeypatch, 1)
+        got = _job(job_id)
+        assert got["status"] == "completed"
+        assert got["processed"] == 5
+        assert got["stats"]["slices"]["next"] == 4
+        assert got["stats"]["slices"]["cumulative"]["rows"] == 5
+
+    def test_processed_rows_never_go_backwards(self, admin_token, client, monkeypatch):
+        """进度只增不减：切片续跑时不能把 processed_rows 重置回 0。"""
+        monkeypatch.setattr(import_module, "get_settings", lambda: _TinySliceSettings())
+        job_id = _upload(client, admin_token, "b3_mono.csv", FIVE_ROW_CSV).json()["id"]
+        monkeypatch.setattr(_import_runner, "async_session_factory", _probe_session_factory)
+
+        seen: list[int] = []
+        for rows_in_slice in (2, 2, 1):
+            assert _process(client, admin_token, job_id).status_code == 200
+            self._one_slice(job_id, monkeypatch, rows_in_slice)
+            seen.append(_job(job_id)["processed"])
+
+        assert seen == [2, 4, 5], f"进度回退或跳变：{seen}"
+
+    def test_empty_sheet_is_reported_not_faked_as_success(self, admin_token, client, monkeypatch):
+        """空表必须显式报错（旧实现读到 0 行也报 completed，用户看到"成功"却一条没有）。"""
+        header_only = "岗位名称,公司名称\n".encode()
+        job_id = _upload(client, admin_token, "b3_empty.csv", header_only).json()["id"]
+
+        slices = (_job(job_id) or {})["stats"]["slices"]
+        assert slices["total_rows"] == 0
+        assert slices["slice_count"] == 0
+        assert slices.get("warning")
+
+        resp = _process(client, admin_token, job_id)
+        assert resp.status_code == 400, "空表不该允许开始处理"
+        assert "数据行" in resp.json()["detail"] or "工作表" in resp.json()["detail"]
+
+    def test_progress_endpoint_exposes_slice_numbers(self, admin_token, client, monkeypatch):
+        """前端要拿得到「第 k/N 片」才知道该不该亮"继续下一片"。"""
+        monkeypatch.setattr(import_module, "get_settings", lambda: _TinySliceSettings())
+        job_id = _upload(client, admin_token, "b3_progress.csv", FIVE_ROW_CSV).json()["id"]
+        monkeypatch.setattr(_import_runner, "async_session_factory", _probe_session_factory)
+        assert _process(client, admin_token, job_id).status_code == 200
+        self._one_slice(job_id, monkeypatch, 2)
+
+        resp = client.get(
+            f"/api/v1/admin/import/{job_id}/progress",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "awaiting_confirmation"
+        assert data["slice_total"] == 3
+        assert data["slice_done"] == 1
+        assert data["slice_next"] == 2
+        assert data["slice_state"] == "awaiting_confirmation"
