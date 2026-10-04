@@ -45,6 +45,12 @@ async function onFile(file: { raw: File }): Promise<void> {
     ElMessage.success('解析完成，请核对画像')
     router.push('/guide/parse')
   } catch (e: any) {
+    // 超时 / 网络中断（没有 response）：后端**仍在解析且会落库**（实测），
+    // 所以不能提示"请重试"——那会让用户把同一份简历再传一遍。
+    if (!e?.response) {
+      ElMessage.warning('解析耗时较长，可能仍在后台进行，请稍后在「我的简历」查看结果')
+      return
+    }
     const detail = e?.response?.data?.detail
     ElMessage.error(detail || '解析失败，请重试')
   } finally {
@@ -117,7 +123,7 @@ async function goBusiness(): Promise<void> {
       </el-upload>
     </div>
 
-    <p v-if="uploading" class="parse-hint">正在解析，约需 10-30 秒…</p>
+    <p v-if="uploading" class="parse-hint">正在解析，约需 30–60 秒，请勿关闭页面…</p>
     <p v-else class="parse-hint is-idle">解析完成后会自动进入下一步，请勿关闭页面。</p>
 
     <p class="uploaded-hint">

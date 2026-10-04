@@ -148,11 +148,18 @@ export const profileApi = {
    * 上传简历并解析（解析-only，后端同步返回结果）
    * POST /api/v1/resume/upload
    * ⚠️ 后端仅接受 PDF（校验后缀 + %PDF magic + max_upload_size_mb）
+   *
+   * ⚠️⚠️ 这一次请求**必须单独放宽超时**：后端是**同步解析**（LLM 跑完才返回），
+   * 实测 1 页 PDF 要 35–40 秒，而 `request.ts` 里 axios 的全局超时是 **30 秒**。
+   * 超时后 axios 会 abort，但后端**会照常跑完并落库** —— 用户看到的是"解析失败，请重试"，
+   * 重试又让同一份简历被再解析一遍（2026-10-04 实测：同一 content_hash 落了 3 条记录、
+   * 烧了 3 次 LLM）。放宽到 180 秒后前端能正常拿到结果。
+   * 后端另有按 `content_hash` 复用已解析结果的兜底，两条一起才彻底闭环。
    */
   uploadResumeForParse: (file: File): Promise<UploadParseResult> => {
     const fd = new FormData()
     fd.append('file', file)
-    return request.post<any, UploadParseResult>('/resume/upload', fd)
+    return request.post<any, UploadParseResult>('/resume/upload', fd, { timeout: 180000 })
   },
 
   /**

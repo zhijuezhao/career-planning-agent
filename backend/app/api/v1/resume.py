@@ -12,9 +12,33 @@ from app.domain.models.resume import Resume
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
 from app.schemas.resume import ResumeDetailResponse, ResumeStatusResponse, ResumeUploadResponse
-from app.utils.file_storage import save_upload_file
+from app.utils.file_storage import compute_file_hash, save_upload_file
 
 router = APIRouter()
+
+
+def _parse_response_from_stored(resume: Resume) -> ResumeUploadResponse:
+    """把库里**已解析**的简历还原成 `/upload` 的响应体（**不再跑一次 LLM**）。
+
+    `five_layers` 没有落库（库里只有 `parsed_data` = LLM 的原始解析结果），但它是
+    `parsed_data` 经 `map_to_five_layers()` **纯本地规则**推导出来的 —— 所以这里现场重算一遍，
+    零 LLM 调用、结果与首次上传完全一致。
+    """
+    from app.core.resume_agent.schemas import ParsedResume
+    from app.core.resume_agent.tools.five_layer_mapper import map_to_five_layers
+
+    parsed = resume.parsed_data or {}
+    five_layers = None
+    try:
+        five_layers = map_to_five_layers(ParsedResume.model_validate(parsed))
+    except Exception:  # noqa: BLE001 - 存量数据形状不合法时降级：只回评分，不炸接口
+        logger.warning("复用已解析简历时五层映射失败 | resume_id={}", resume.id)
+    return ResumeUploadResponse(
+        resume_id=resume.id,
+        status=resume.status,
+        five_layers=five_layers,
+        dimension_scoring=parsed.get("dimension_scoring"),
+    )
 
 
 @router.post("/upload", status_code=202, response_model=ResumeUploadResponse)
@@ -38,6 +62,35 @@ async def upload_resume(
 
     if not file_bytes[:5].startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="Invalid PDF file")
+
+    # 同一份 PDF 重复上传 → **复用已解析结果**，不再解析第二次。
+    #
+    # 为什么必须有（2026-10-04 实测事故）：本接口是**同步解析**（LLM 跑完才返回），
+    # 1 页 PDF 要 35–40 秒；而前端 `student/src/api/request.ts` 的 axios 超时是 **30 秒** ——
+    # 客户端先 abort，后端却照常跑完并落库，用户看到"解析失败，请重试"就又传一次。
+    # 实测同一份简历（`content_hash` 相同）被完整解析了 **3 次**：3 条重复记录 + 3 次 LLM 花费。
+    # 有了这一步，重试变成零成本（前端超时兜底也就能给出"仍会出结果"的准确提示）。
+    content_hash = compute_file_hash(file_bytes)
+    existing = (
+        await db.execute(
+            select(Resume)
+            .where(
+                Resume.user_id == current_user.id,
+                Resume.content_hash == content_hash,
+                Resume.status == "parsed",
+            )
+            .order_by(desc(Resume.created_at))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        logger.info(
+            "重复上传同一份简历，复用已解析结果 | user_id={} | resume_id={} | hash={}",
+            current_user.id,
+            existing.id,
+            content_hash[:12],
+        )
+        return _parse_response_from_stored(existing)
 
     file_path, content_hash = save_upload_file(file_bytes, current_user.id, file.filename)
 
