@@ -431,14 +431,21 @@ class TestJobGeoFilterAPI:
         assert data["items"][0]["id"] == geo_jobs["fallback_job"]
 
     def test_multi_company_job_matches_both_regions(self, client: TestClient, admin_token: str, geo_jobs):
-        """一条岗位被两家不同省的公司招 → **两个省都筛得到同一条**（多对多的要点）。"""
+        """一条岗位被两家不同省的公司招 → **两个省都筛得到同一条**（多对多的要点）。
+
+        ⚠️ 这里断言"**筛得到本用例那条**"，而不是 `total == 1`。
+        原因（2026-10-04）：dev 库现在装着**真实导入的比赛数据**（398 条原始行 → 全国各地
+        的公司在招），其中就有新疆/乌鲁木齐的岗位（培训师、法务专员/助理）。
+        `total == 1` 这种"全省只有我一条"的断言会被真实数据打破 —— 而它本来也不是
+        本用例要证明的事（要证明的是"同一条岗位在两个省都筛得到"）。
+        """
         headers = {"Authorization": f"Bearer {admin_token}"}
         for region, city in (("宁夏", "银川"), ("新疆", "乌鲁木齐")):
             data = client.get(
-                "/api/v1/admin/jobs", params={"region": region, "city": city}, headers=headers
+                "/api/v1/admin/jobs", params={"region": region, "city": city, "limit": 100}, headers=headers
             ).json()
-            assert data["total"] == 1, f"{region} 没筛到"
-            assert data["items"][0]["id"] == geo_jobs["multi_job"]
+            ids = [item["id"] for item in data["items"]]
+            assert geo_jobs["multi_job"] in ids, f"{region} 没筛到多公司岗位（命中 {ids}）"
 
     def test_geo_options_include_link_and_fallback_regions(
         self, client: TestClient, admin_token: str, geo_jobs

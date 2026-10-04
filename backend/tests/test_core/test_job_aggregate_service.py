@@ -123,6 +123,33 @@ def _session():
     return session
 
 
+class _FakeProfile:
+    """`upsert_job_profile` 的返回值替身 —— 只需要 `.id`（落库后要拿它写岗位向量）。"""
+
+    def __init__(self, profile_id: int) -> None:
+        self.id = profile_id
+
+
+@pytest.fixture(autouse=True)
+def _stub_job_embedding(monkeypatch):
+    """**默认替身**：`_upsert_group` 落库后会调 `embed_job` 写岗位向量。
+
+    不替身的话：① 单测会**真的去调 embedding 接口**（联网 + 计费 + 慢）；
+    ② `session` 是 AsyncMock，会走到真实 `_do_embed_job` 里拿到 MagicMock 当画像。
+    需要断言"确实写了向量"的用例自己再覆盖一次（见 `TestUpsertGroupWritesJobVector`）。
+    """
+    from app.core.matching import job_matcher
+
+    calls: list[int] = []
+
+    async def fake_embed(job_profile_id, session=None):
+        calls.append(job_profile_id)
+        return object()
+
+    monkeypatch.setattr(job_matcher, "embed_job", fake_embed)
+    return calls
+
+
 class TestAggregateRoles:
     @pytest.mark.asyncio
     async def test_one_call_per_group_and_one_upsert(self, wired):
@@ -219,9 +246,88 @@ class TestAggregateRoles:
     @pytest.mark.asyncio
     async def test_progress_stats_are_complete(self, wired):
         stats = await svc.aggregate_roles(_session())
-        for key in ("groups", "ok", "failed", "postings", "by_level", "errors", "elapsed_s", "prompt_version"):
+        for key in (
+            "groups", "ok", "failed", "postings", "by_level", "errors", "elapsed_s",
+            "prompt_version", "embedded",
+        ):
             assert key in stats, key
         assert stats["prompt_version"] == svc.AGGREGATE_PROMPT_VERSION
+
+
+class TestUpsertGroupWritesJobVector:
+    """回归（2026-10-04 事故）：聚合落库时必须**顺手写岗位向量**。
+
+    事故：匹配（`search_jobs_by_vector`）**只读** `job_match_embeddings`，而导入链路
+    （persist / 聚合）**从不写它** —— 原来只有管理员手动新建岗位（`admin/jobs.py`
+    的 `create_job`）和单人重建（`POST /admin/jobs/{id}/re-embed`）会写。
+    结果：导入 87 条画像、`job_match_embeddings` **0 行**，学生端「选择岗位」提示
+    "岗位库还没有可用的岗位向量，或本次匹配没有返回结果"。
+
+    这条断言打在**真实的 `_upsert_group`** 上（不是替身）：向量写入是"调用方"行为，
+    替身化的单测永远抓不到（同 `_finish_slice(touched_titles=...)` 那次的教训）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_embed_called_with_written_profile_id(self, monkeypatch):
+        from app.core.matching import job_matcher
+
+        seen: list[tuple[int, object]] = []
+
+        async def fake_upsert(_session, _data):
+            return _FakeProfile(4242), True
+
+        async def fake_embed(job_profile_id, session=None):
+            seen.append((job_profile_id, session))
+            return object()
+
+        monkeypatch.setattr(svc, "upsert_job_profile", fake_upsert)
+        monkeypatch.setattr(job_matcher, "embed_job", fake_embed)
+
+        session = AsyncMock()
+        ok = await svc._upsert_group(
+            session,
+            title="Java",
+            level="初级",
+            salary_stats={"envelope": "5000-5400"},
+            card={"core_skills": [], "bonus_skills": [], "excluded_noise": [], "level_objections": []},
+            card_payload={},
+            portrait={"six_dimensions": {}, "outlook": {}, "summary": "s", "portrait_ok": True},
+            posting_count=3,
+        )
+
+        assert ok is True
+        assert seen == [(4242, session)], "必须用**刚落库那条画像的 id**写向量，且复用同一 session"
+
+    @pytest.mark.asyncio
+    async def test_embed_failure_does_not_fail_the_group(self, monkeypatch):
+        """向量失败（`embed_job` 吞异常后返回 None）**不能**让画像写入算失败。
+
+        岗位画像本身是聚合的核心产物，不该被向量接口拖垮 —— 向量可以事后用
+        `scripts/backfill_job_embeddings.py` 补。
+        """
+        from app.core.matching import job_matcher
+
+        async def fake_upsert(_session, _data):
+            return _FakeProfile(7), True
+
+        async def failing_embed(job_profile_id, session=None):
+            return None
+
+        monkeypatch.setattr(svc, "upsert_job_profile", fake_upsert)
+        monkeypatch.setattr(job_matcher, "embed_job", failing_embed)
+
+        ok = await svc._upsert_group(
+            AsyncMock(),
+            title="Java",
+            level="初级",
+            salary_stats={"envelope": "5000-5400"},
+            card={"core_skills": [], "bonus_skills": [], "excluded_noise": [], "level_objections": []},
+            card_payload={},
+            portrait={"six_dimensions": {}, "outlook": {}, "summary": "s", "portrait_ok": True},
+            posting_count=3,
+        )
+
+        assert ok is False
 
 
 class TestUpsertGroupSkillNormalisation:
@@ -237,7 +343,7 @@ class TestUpsertGroupSkillNormalisation:
 
         async def fake_upsert(_session, data):
             captured.update(data)
-            return None, True
+            return _FakeProfile(1), True
 
         monkeypatch.setattr(svc, "upsert_job_profile", fake_upsert)
 
@@ -284,7 +390,7 @@ class TestUpsertGroupSkillNormalisation:
 
         async def fake_upsert(_session, data):
             captured.update(data)
-            return None, True
+            return _FakeProfile(2), True
 
         monkeypatch.setattr(svc, "upsert_job_profile", fake_upsert)
         await svc._upsert_group(

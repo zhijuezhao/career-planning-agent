@@ -112,6 +112,8 @@ async def aggregate_roles(
         "postings": 0,
         "by_level": {},
         "errors": [],
+        # 岗位向量写入成功数（`ok - embedded` 就是向量失败数；画像仍然落库）
+        "embedded": 0,
         "dry_run": dry_run,
         "prompt_version": AGGREGATE_PROMPT_VERSION,
     }
@@ -165,8 +167,9 @@ async def aggregate_roles(
             {"job_data": json.dumps(card_payload, ensure_ascii=False)}
         )
 
+        embedded = False
         if not dry_run:
-            await _upsert_group(
+            embedded = await _upsert_group(
                 session,
                 title=role,
                 level=level,
@@ -176,6 +179,8 @@ async def aggregate_roles(
                 portrait=portrait,
                 posting_count=len(group_rows),
             )
+            if embedded:
+                stats["embedded"] += 1
 
         stats["ok"] += 1
         if not portrait.get("portrait_ok", True):
@@ -208,13 +213,16 @@ async def _upsert_group(
     card_payload: dict,
     portrait: dict,
     posting_count: int,
-) -> None:
-    """把一组的综合结果写成一条 `job_profiles`（按 `(title_key, level)` 幂等）。
+) -> bool:
+    """把一组的综合结果写成一条 `job_profiles`（按 `(title_key, level)` 幂等），并写岗位向量。
+
+    返回**是否成功写入向量**（`False` = 向量失败/降级，画像本身仍已落库）。
 
     B5（2026-10-03）：技能在落库前再走一遍**归一化 + 数量上限**。
     提示词里已经要求模型输出"最基础的技术名词、核心≤20 / 加分≤10"，
     但提示词是**约定**不是**保证** —— 这里做第二道防线（生成时预防 + 落库前归一双保险）。
     """
+    from app.core.matching.job_matcher import embed_job
     # 归一化 + 去重 + 上限（用户 2026-10-03：核心 ≤20 / 加分 ≤10）
     core_skills = normalise_skills(card.get("core_skills"), limit=CORE_SKILL_LIMIT)
     bonus_skills = normalise_skills(card.get("bonus_skills"), limit=BONUS_SKILL_LIMIT)
@@ -256,4 +264,11 @@ async def _upsert_group(
             "portrait_error": portrait.get("portrait_error"),
         },
     }
-    await upsert_job_profile(session, data)
+    profile, _created = await upsert_job_profile(session, data)
+    # 岗位向量：匹配阶段（`search_jobs_by_vector`）**只读** `job_match_embeddings`，
+    # 而导入链路（persist / 聚合）原本**从不写它** —— 原来只有管理员手动新建或
+    # `POST /admin/jobs/{id}/re-embed` 才会写。结果：导入 87 条画像、向量表 0 行，
+    # 学生端匹配必然提示"岗位库还没有可用的岗位向量"（2026-10-04 实测）。
+    # `embed_job` 自己吞异常只打 warning，所以向量失败不会拖垮聚合（画像照样落库）。
+    embedded = await embed_job(profile.id, session=session)
+    return embedded is not None
