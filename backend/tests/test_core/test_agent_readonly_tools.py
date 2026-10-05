@@ -244,17 +244,39 @@ class TestJobSearchTool:
         assert {"job_search", "job_detail", "user_snapshot"} <= set(names)
 
     def test_keyword_is_case_and_space_insensitive(self, seeded_jobs):
-        result = asyncio.run(job_search.ainvoke({"keyword": "  java  "}))
-        assert result["total"] == 1
-        assert result["jobs"][0]["id"] == seeded_jobs["java"]
+        # ⚠️ **不能断言全库 `total == 1`**：真实导入数据里也有 Java 岗位（实测 5 条命中），
+        #    旧写法假定"库里只有本用例造的那一条"。这里改成范围正确的两条：
+        #    ① 常用关键词下**我自己那条必须在结果里**；
+        #    ② 用**本用例唯一前缀的标题**换成大写 + 首尾加空格再搜 —— 命中集合只可能是我造的
+        #       数据（真实数据不带该前缀），于是"忽略大小写与空格"仍被精确证明。
+        loose = asyncio.run(job_search.ainvoke({"keyword": "  java  ", "limit": 50}))
+        assert seeded_jobs["java"] in [j["id"] for j in loose["jobs"]]
+
+        strict = asyncio.run(
+            job_search.ainvoke({"keyword": f"  {_title('java工程师').upper()}  ", "limit": 50})
+        )
+        assert strict["total"] == 1, strict
+        assert [j["id"] for j in strict["jobs"]] == [seeded_jobs["java"]]
 
     def test_region_filter_and_link_level_company(self, seeded_jobs):
-        result = asyncio.run(job_search.ainvoke({"region": "广东", "city": "深圳"}))
-        assert [j["id"] for j in result["jobs"]] == [seeded_jobs["java"]]
-        company = result["jobs"][0]["companies"][0]
+        result = asyncio.run(
+            job_search.ainvoke({"region": "广东", "city": "深圳", "limit": 50})
+        )
+        # ⚠️ **不能断言全库只有我这一条广东/深圳岗位**：真实导入数据里也有（实测 total=13）。
+        #    改成"我这条必须被筛到，且带回的在招公司地域就是这次招聘的值" ——
+        #    筛选口径 `coalesce(关联行地域, 公司地域)` 与展示口径同源，语义不变。
+        rows = {j["id"]: j for j in result["jobs"]}
+        assert seeded_jobs["java"] in rows
+        company = rows[seeded_jobs["java"]]["companies"][0]
         assert company["company_name"] == _company("甲")
         assert (company["region"], company["city"]) == ("广东", "深圳")
         assert company["salary"] == "25-40K"
+
+        # 口径一致的另一半：换成它**不在**的城市，同一条必须筛不出来（不看全库，只看我这条）
+        miss = asyncio.run(
+            job_search.ainvoke({"region": "广东", "city": "广州", "limit": 50})
+        )
+        assert seeded_jobs["java"] not in [j["id"] for j in miss["jobs"]]
 
     def test_region_filter_falls_back_to_company(self, seeded_jobs):
         """前端那条的关联行没写地域 → 按公司所在地（北京）也要筛得到。

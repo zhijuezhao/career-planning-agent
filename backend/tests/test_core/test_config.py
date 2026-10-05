@@ -3,8 +3,6 @@
 import os
 from unittest.mock import patch
 
-import pytest
-
 from app.config import Settings, get_settings
 
 
@@ -118,25 +116,25 @@ class TestGetSettings:
 
 class TestLLMSettings:
     def test_default_deepseek_model(self):
-        settings = Settings()
+        settings = Settings(_env_file=None)
         assert settings.deepseek_model == "deepseek-chat"
 
     def test_default_qwen_model(self):
-        settings = Settings()
+        settings = Settings(_env_file=None)
         assert settings.qwen_model == "qwen-plus"
 
     def test_default_embedding_model(self):
-        settings = Settings()
+        settings = Settings(_env_file=None)
         assert "Qwen3" in settings.siliconflow_embedding_model
 
     def test_default_llm_fallback_order(self):
-        settings = Settings()
+        settings = Settings(_env_file=None)
         assert settings.llm_fallback_order == "deepseek,qwen"
 
     def test_default_llm_temperature(self):
-        settings = Settings()
+        settings = Settings(_env_file=None)
         assert settings.llm_temperature == 0.7
 
     def test_default_llm_max_tokens(self):
-        settings = Settings()
+        settings = Settings(_env_file=None)
         assert settings.llm_max_tokens == 4096

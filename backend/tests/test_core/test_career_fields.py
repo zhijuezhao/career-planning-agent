@@ -21,6 +21,25 @@ from app.domain.models.job import JobProfile, JobRawData
 from sqlalchemy import select
 from tests.conftest import test_session_factory
 
+
+def _parsed_has_career_labels(description: str | None, requirements: str | None) -> bool:
+    """这份源文本里到底有没有「岗位晋升 / 换岗方向 / 所需证书」标签？
+
+    用来区分两种数据：
+    * **职业发展路线表**（`#853` 那 82 行）—— 源文本带这些标签 → 三列**必须**回填；
+    * **智联招聘岗位表**（2026-10-04 导入的 524 行）—— 只有职责/要求 → 源里没有这些信息，
+      三列**本来就该为空**（要求非空等于要求系统造数据）。
+
+    ⚠️ 用 `looks_suspicious` 过滤过的值才算数 —— 与回填脚本同一口径，
+    否则"某个字段名恰好出现在长文本里"会被当成有标签。
+    """
+    parsed = extract_career_fields(description, requirements)
+    for field_name in ("career_path", "certificates"):
+        items = parsed.get(field_name) or []
+        if items and not looks_suspicious(items, field_name):
+            return True
+    return False
+
 # 与真实数据同形的两条文本（实测 84/84 行格式一致）
 DESCRIPTION = "岗位晋升：全栈工程师 / 技术经理\n换岗方向：测试开发工程师 / Python / 数据工程师"
 REQUIREMENTS = (
@@ -117,23 +136,58 @@ class TestBackfilledData:
         return asyncio.run(_query())
 
     def test_all_profiles_have_career_path_and_certificates(self):
-        """**导入进来的**岗位都要有三列。
+        """**源文本里写了职业字段的**岗位，三列必须落库且非空。
 
-        ⚠️ 只检查"有同名 `job_raw_data` 行"的岗位（= 真导入数据）：测试自己 upsert 出来
-        的岗位没有原始行，不该被这条断言波及（否则一跑测试就红，属测试卫生问题）。
+        ⚠️ 不能要求"所有导入岗位都非空"（2026-10-04 修正）：这三列由 `career_fields.py`
+        从源文本里的 `岗位晋升：/ 换岗方向：/ 所需证书：` 标签**确定性解析**得到，
+        而这些标签只存在于**职业发展路线表**那个数据集。本次真实导入的智联招聘表
+        （524 行 × 12 列）只有岗位职责/任职要求 —— 源里根本没有这些信息，
+        实测对这批数据跑回填脚本「可解析 0 处」。要求它非空等于要求系统凭空造数据。
+
+        所以断言分两层：
+        ① 所有导入岗位这三列都必须是**数组**（接口契约，前端按数组渲染）；
+        ② **凡源文本里能解析出职业字段的**，必须真的落库且非空。
+
+        ⚠️ 只检查"有同名 `job_raw_data` 行"的岗位（= 真导入数据）：测试自己 upsert 出来的
+        岗位没有原始行，不该被这条断言波及（否则一跑测试就红，属测试卫生问题）。
         """
         profiles, raws = self._load()
         if not profiles:
             pytest.skip("库里没有岗位数据")
-        raw_titles = {raw.title for raw in raws}
-        imported = [p for p in profiles if p.title in raw_titles]
+
+        by_title: dict[str, list] = {}
+        for raw in raws:
+            by_title.setdefault(raw.title, []).append(raw)
+        imported = [p for p in profiles if p.title in by_title]
         if not imported:
             pytest.skip("库里没有可追溯的导入岗位")
+
+        # ① 类型契约（空值有两种合法形态：SQL NULL / JSON null → Python None，或空数组 []）
         for profile in imported:
-            assert isinstance(profile.career_path, list), f"{profile.title} 的 career_path 不是数组"
-            assert profile.career_path, f"{profile.title} 的 career_path 为空"
-            assert isinstance(profile.certificates, list), f"{profile.title} 的 certificates 不是数组"
-            assert profile.certificates, f"{profile.title} 的 certificates 为空"
+            assert profile.career_path is None or isinstance(profile.career_path, list), (
+                f"{profile.title} 的 career_path 既不是数组也不是空：{profile.career_path!r}"
+            )
+            assert profile.certificates is None or isinstance(profile.certificates, list), (
+                f"{profile.title} 的 certificates 既不是数组也不是空：{profile.certificates!r}"
+            )
+
+        # ② 源文本里有标签的，必须非空
+        with_labels = [
+            profile
+            for profile in imported
+            if any(
+                _parsed_has_career_labels(raw.description, raw.requirements)
+                for raw in by_title[profile.title]
+            )
+        ]
+        if not with_labels:
+            pytest.skip(
+                "当前数据集的源文本里没有「岗位晋升/换岗方向/所需证书」标签"
+                "（如智联招聘表）→ 无内容可回填，这条不适用"
+            )
+        for profile in with_labels:
+            assert profile.career_path, f"{profile.title} 的源文本有职业字段，但 career_path 为空"
+            assert profile.certificates, f"{profile.title} 的源文本有职业字段，但 certificates 为空"
 
     def test_stored_values_equal_source_text_parse(self):
         """逐条对账：**本次回填写入的值 == 源文本解析值**。
@@ -155,9 +209,7 @@ class TestBackfilledData:
         for raw in raws:
             by_title.setdefault(raw.title, []).append((raw.description, raw.requirements))
 
-        matched = 0
-        preserved: list[str] = []
-        other_shaped: list[str] = []
+        with_labels = 0
         checked = 0
         for profile in profiles:
             sources = by_title.get(profile.title)
@@ -172,20 +224,26 @@ class TestBackfilledData:
                         if item not in bucket:
                             bucket.append(item)
 
-            # 这两列回填前是空的 → 必须与源文本逐字一致
-            for field_name in ("career_path", "certificates"):
-                assert getattr(profile, field_name) == expected[field_name], (
-                    f"{profile.title} 的 {field_name} 与源文本不一致"
-                )
-
-            stored = profile.transition_paths
-            assert stored, f"{profile.title} 的 transition_paths 为空"
-            if isinstance(stored, list) and stored == expected["transition_paths"]:
-                matched += 1
-            elif isinstance(stored, list):
-                preserved.append(profile.title)  # 回填前就有的旧值，按"只填空"保留
-            else:
-                other_shaped.append(profile.title)  # 历史 object 形状，同样保留
+            # 三列都是**源文本确定性解析**的产物 → 双向对账：
+            #   源里有 → 库里必须逐字一致（回填写的就是它）；
+            #   源里没有 → 库里必须为空（**不许凭空有值**）。
+            # ⚠️ 原实现写死 `expected[field_name]`（源里没有就 KeyError）并要求
+            #    `transition_paths` 非空 —— 那是**职业发展路线表**专属假设。本次导入的
+            #    智联招聘表源文本里没有这些标签（实测三列全空、回填脚本「可解析 0 处」），
+            #    旧断言会把"源里本来就没有"误判成"回填没生效"。
+            for field_name in ("career_path", "certificates", "transition_paths"):
+                stored_value = getattr(profile, field_name)
+                source_value = expected.get(field_name, [])
+                if source_value:
+                    with_labels += 1
+                    assert stored_value == source_value, (
+                        f"{profile.title} 的 {field_name} 与源文本不一致："
+                        f"库={stored_value!r} 源={source_value!r}"
+                    )
+                else:
+                    assert not stored_value, (
+                        f"{profile.title} 的 {field_name} 源文本里没有，库里却写着 {stored_value!r}"
+                    )
 
         if checked == 0:
             # 与 `test_all_profiles_have_career_path_and_certificates` 同一套口径：
@@ -193,10 +251,11 @@ class TestBackfilledData:
             # 而不是拿 `assert checked >= 1` 报红（2026-09-27：清库后暴露的测试卫生问题）。
             pytest.skip("库里没有可追溯的导入岗位（与 job_raw_data 对不上）")
 
-        assert matched >= 1, "没有任何一条 transition_paths 与源文本一致，回填可能没生效"
-        # 被保留的旧值只能是少数（本次回填覆盖了绝大多数）
-        assert len(preserved) + len(other_shaped) < checked
-        assert checked == matched + len(preserved) + len(other_shaped)
+        # 至少要真对过一条账（否则说明过滤口径把数据全排除了）
+        assert checked >= 1
+        # `with_labels` 在智联招聘表上整表为 0（源里没有这些标签）—— 属**正常**，
+        # 不是"回填没生效"；回填是否生效由上面的双向对账保证。
+        print(f"[career-fields] 对账 {checked} 条；源文本带职业字段标签 {with_labels} 处")
 
 
 class TestFieldLabelsAreStable:

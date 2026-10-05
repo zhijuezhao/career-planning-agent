@@ -228,12 +228,23 @@ class TestCompanyAuth:
 
 class TestCompanyList:
     def test_list_orders_by_job_count(self, client: TestClient, admin_token: str, seeded):
-        resp = client.get("/api/v1/admin/companies", headers=_headers(admin_token))
+        # ⚠️ **不能对全库列表断言**：dev 库里装着真实导入的公司（87 家），它们按
+        #    job_count 降序排在本用例两家前面，会把「乙公司」（job_count=1）挤出默认分页
+        #    （`limit=20`）→ 旧写法「全库恰好只剩我这两家」必红。所以用 `q` 把候选收敛到
+        #    本用例的唯一前缀，只在前缀内断言顺序。
+        resp = client.get(
+            "/api/v1/admin/companies",
+            params={"q": _PREFIX, "limit": 100},
+            headers=_headers(admin_token),
+        )
         assert resp.status_code == 200, resp.text
         items = resp.json()["items"]
         mine = [i for i in items if i["name"].startswith(_company(""))]
         assert [i["name"] for i in mine] == [_company("甲"), _company("乙")]  # 2 个岗位在前
         assert [i["job_count"] for i in mine] == [2, 1]
+        # 降序是**整个返回列表**的性质（不只我这几家）：前缀内 job_count 必须单调不增
+        counts = [i["job_count"] for i in items]
+        assert counts == sorted(counts, reverse=True), counts
 
     def test_search_and_only_with_jobs(self, client: TestClient, admin_token: str, seeded):
         resp = client.get(

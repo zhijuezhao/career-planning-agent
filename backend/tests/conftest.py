@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from app.config import get_settings
-from app.infrastructure.database import async_session_factory, get_db
+from app.infrastructure.database import get_db
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
@@ -67,8 +67,16 @@ def authed_user(client):
 
 @pytest_asyncio.fixture
 async def db_session():
-    """新开一个 async session（连 dev DB），供测试直接构造行。"""
-    async with async_session_factory() as session:
+    """新开一个 async session（连 dev DB），供测试直接构造行。
+
+    ⚠️ 必须用 conftest 的 `test_session_factory`（**NullPool**），不能用应用的池化
+    `async_session_factory` —— 后者会把 asyncpg 连接留在连接池里，而 pytest-asyncio 每个
+    用例一个事件循环，连接在下一个 loop 里复用时 Windows 上**必现**
+    `RuntimeError: Event loop is closed`（实测：`test_journey_status.py` 稳定报
+    teardown ERROR）。这正是本文件 §"Admin 测试共享 fixture" 记的那个坑，只是
+    `db_session` 当时漏改了。
+    """
+    async with test_session_factory() as session:
         yield session
 
 
