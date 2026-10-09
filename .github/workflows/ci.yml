@@ -74,7 +74,14 @@ jobs:
       - name: Run database migrations
         working-directory: backend
         run: |
-          python -m alembic upgrade head
+          set -o pipefail
+          # 失败时把错误尾部打成 annotation（annotation 无需登录即可在仓库首页看到，
+          # 也让"迁移挂了但看不到原因"这件事不再发生）
+          if ! python -m alembic upgrade head 2>&1 | tee /tmp/alembic.log; then
+            echo "::error title=alembic upgrade head 失败::$(tail -c 1200 /tmp/alembic.log | tr '\n' '|' | tr -d '\r')"
+            echo "::error title=CI 版本信息::$(python -c 'import sys, alembic, sqlalchemy, asyncpg; print(sys.version.split()[0], "alembic", alembic.__version__, "sqlalchemy", sqlalchemy.__version__, "asyncpg", asyncpg.__version__)')"
+            exit 1
+          fi
 
       - name: Unit tests
         working-directory: backend
