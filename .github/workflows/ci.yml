@@ -86,9 +86,19 @@ jobs:
       - name: Unit tests
         working-directory: backend
         run: |
-          python -m pytest tests/test_core/ -v --cov=app/core --cov-report=term-missing
+          set -o pipefail
+          if ! python -m pytest tests/test_core/ -v --cov=app/core --cov-report=term-missing 2>&1 | tee /tmp/pytest-core.log; then
+            echo "::error title=test_core 失败用例::$(grep -E '^(FAILED|ERROR)' /tmp/pytest-core.log | head -25 | tr '\n' '|' | tr -d '\r')"
+            echo "::error title=test_core 报错尾部::$(tail -c 1500 /tmp/pytest-core.log | tr '\n' '|' | tr -d '\r')"
+            exit 1
+          fi
 
       - name: Integration tests
         working-directory: backend
         run: |
-          python -m pytest tests/test_api/ -v
+          set -o pipefail
+          if ! python -m pytest tests/test_api/ -v 2>&1 | tee /tmp/pytest-api.log; then
+            echo "::error title=test_api 失败用例::$(grep -E '^(FAILED|ERROR)' /tmp/pytest-api.log | head -25 | tr '\n' '|' | tr -d '\r')"
+            echo "::error title=test_api 报错尾部::$(tail -c 1500 /tmp/pytest-api.log | tr '\n' '|' | tr -d '\r')"
+            exit 1
+          fi
