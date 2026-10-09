@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.admin.auth import require_admin
 from app.api.v1.auth import require_auth
 from app.domain.models.user import User
 from app.infrastructure.database import get_db
@@ -16,7 +17,7 @@ router = APIRouter()
 async def list_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
-    current_user: User = Depends(require_auth),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     count_stmt = select(func.count()).select_from(User)
@@ -38,6 +39,8 @@ async def get_user(
     current_user: User = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
+    if current_user.role != "admin" and current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")

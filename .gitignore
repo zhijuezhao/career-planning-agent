@@ -44,3 +44,18 @@ poetry.lock
 # 验收需要"只含已提交代码"的运行时，故单独导出一份到 .verify-src/
 .verify-src/
 .verify-src.tar
+
+# === 敏感数据与运行时产物（绝不上传）===
+# 数据库 dump、用户简历 PDF/上传 xlsx —— 含真实用户隐私
+backups/
+# 后端运行时生成的报告 docx
+backend/output/
+# 临时调试目录（.dsh-tmp）与 ruff 缓存
+.dsh-tmp/
+.ruff_cache/
+# TS 增量构建产物
+*.tsbuildinfo
+# nginx TLS 私钥/证书（即使目录暂时为空，未来放证书时也绝不入库）
+nginx/ssl/
+# 前端 node_modules 兜底（子目录已有各自 .gitignore）
+node_modules/

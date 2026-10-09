@@ -56,7 +56,7 @@ services:
       - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
       - admin_frontend_dist:/usr/share/nginx/html/admin:ro
       - student_frontend_dist:/usr/share/nginx/html/student:ro
     depends_on:
@@ -70,6 +70,9 @@ services:
       dockerfile: Dockerfile.backend
     container_name: career_backend
     restart: unless-stopped
+    # Locally only: host `./backend` bind-mount + Windows file sharing blocks the
+    # image's non-root appuser from writing ./backend/logs, so run as root in dev.
+    user: "root"
     env_file:
       - .env
     environment:
