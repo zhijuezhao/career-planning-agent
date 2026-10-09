@@ -237,11 +237,14 @@ class TestSnapshotStep:
 
 
 class TestMatchingStep:
-    def test_matching_returns_ranked_results(self, live_client, chain, ensure_some_jobs):
+    def test_matching_returns_ranked_results(self, live_client, chain, ensure_job_vectors):
         """匹配必须真的返回候选（岗位向量存在时）。
 
         `max_distance=2.0` 是余弦距离的**上界**，等于"不做距离过滤"—— 这样断言与
         替身向量的取值无关（真实距离阈值另有前端默认 0.65 的用例）。
+
+        `ensure_job_vectors`（conftest）：全新库里没有岗位向量，用它补齐 ≥3 条
+        确定性替身向量；开发库本来就有 82 条时不插手。
         """
         resp = live_client.post(
             "/api/v1/matching/run",
@@ -279,7 +282,7 @@ class TestReportStep:
         assert len(results) == 3, f"报告要求恰 3 项匹配，实际 {len(results)}：{results}"
         return [{"job_profile_id": r["job_profile_id"], "match_score": r["match_score"]} for r in results]
 
-    def test_generate_list_detail_and_download(self, live_client, chain):
+    def test_generate_list_detail_and_download(self, live_client, chain, ensure_job_vectors):
         payload = {
             "profile_snapshot_id": chain["snapshot_id"],
             "matching_results": self._three_results(live_client, chain),
@@ -303,7 +306,7 @@ class TestReportStep:
         assert download.status_code == 200, download.text
         assert len(download.content) > 0, "下载到的 Word 不能是空文件"
 
-    def test_two_matching_results_is_rejected(self, live_client, chain):
+    def test_two_matching_results_is_rejected(self, live_client, chain, ensure_job_vectors):
         """**错误状态要可检查**：只给 2 项必须被明确拒绝（不许"凑合生成"）。"""
         two = self._three_results(live_client, chain)[:2]
         resp = live_client.post(

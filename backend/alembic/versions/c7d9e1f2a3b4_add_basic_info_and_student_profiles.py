@@ -41,7 +41,13 @@ def upgrade() -> None:
         sa.Column('weekly_hours', sa.Integer(), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.ForeignKeyConstraint(['user_id'], ['users.id'], name='fk_student_profiles_user_id'),
+        # 2026-10-09 修复：原先是 NO ACTION，而 app 的 delete_user 只显式删
+        # chat_sessions/chat_messages/resumes，`student_profiles` 靠**级联**清理
+        # → 全新库上删用户抛 FK 违约（实测 test_delete_user_with_dependents 失败）。
+        # 开发库该外键本就是 ON DELETE CASCADE，这里保持一致。
+        sa.ForeignKeyConstraint(
+            ['user_id'], ['users.id'], name='fk_student_profiles_user_id', ondelete='CASCADE'
+        ),
         sa.PrimaryKeyConstraint('user_id', name='pk_student_profiles'),
     )
     op.create_index('ix_student_profiles_user_id', 'student_profiles', ['user_id'], unique=True)

@@ -8,7 +8,7 @@ from app.config import get_settings
 from app.infrastructure.database import get_db
 from app.main import app
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -216,3 +216,71 @@ def ensure_some_jobs():
     yield
     if created:
         asyncio.run(drop_seeded_jobs())
+
+
+# ── 「保证库里有岗位向量」的共享实现 ────────────────────────────────────────────
+# 背景（2026-10-09 CI 修复）：`test_e2e_business_chain` 的匹配/报告用例前提是
+# **库里有岗位向量**（"库里有 ≥3 条岗位向量就必然拿到 ≥3 条候选"）。开发库里有
+# 82 条真实岗位向量，所以本地一直绿；但全新库（CI / 新克隆）里是 **0 条** ——
+# 岗位向量由**导入链路**写入（`job_agent/tools/db_writer.py`），测试不跑导入，
+# 于是匹配永远 0 结果、报告拿不到 3 项。这里用**确定性替身向量**补齐，
+# 让链路用例不再依赖"某个库恰好被导入过"。库里本来够就完全不插手。
+
+_ENSURE_VECTORS_PREFIX = f"ensvec_{int(time.time())}"
+_EMBEDDING_DIM = 1024
+
+
+async def seed_job_vectors_if_missing(minimum: int = 3) -> list[int]:
+    """保证 `job_match_embeddings` 至少 `minimum` 条；返回**本次新建的岗位 id**。"""
+    from app.domain.models.vector import JobMatchEmbedding
+    from app.domain.services.job_persist_service import upsert_job_profile
+
+    created: list[int] = []
+    async with test_session_factory() as session:
+        total = (
+            await session.execute(select(func.count()).select_from(JobMatchEmbedding))
+        ).scalar() or 0
+        if total >= minimum:
+            return created
+
+        for index in range(minimum - total):
+            profile, _ = await upsert_job_profile(
+                session, {"title": f"{_ENSURE_VECTORS_PREFIX}_{index}"}
+            )
+            session.add(
+                JobMatchEmbedding(
+                    job_profile_id=profile.id,
+                    content=f"seed job vector {index}",
+                    embedding=[0.01] * _EMBEDDING_DIM,
+                )
+            )
+            created.append(profile.id)
+        await session.commit()
+    return created
+
+
+async def drop_seeded_job_vectors(profile_ids: list[int]) -> None:
+    """删掉 `seed_job_vectors_if_missing()` 造的数据。
+
+    顺序不能反：`job_match_embeddings` → `job_profiles` 的外键**没有级联**，
+    先删岗位会挂在 FK 上。
+    """
+    if not profile_ids:
+        return
+    from app.domain.models.job import JobProfile
+    from app.domain.models.vector import JobMatchEmbedding
+
+    async with test_session_factory() as session:
+        await session.execute(
+            delete(JobMatchEmbedding).where(JobMatchEmbedding.job_profile_id.in_(profile_ids))
+        )
+        await session.execute(delete(JobProfile).where(JobProfile.id.in_(profile_ids)))
+        await session.commit()
+
+
+@pytest.fixture
+def ensure_job_vectors():
+    """函数级：保证库里有 ≥3 条岗位向量（用完还原；本来就有则不动）。"""
+    created = asyncio.run(seed_job_vectors_if_missing())
+    yield
+    asyncio.run(drop_seeded_job_vectors(created))

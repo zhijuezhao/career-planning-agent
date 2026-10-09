@@ -1,13 +1,18 @@
 """add batch2 tables (llm config center / companies / match records / link enrich)
 
 Revision ID: b8d0f2a4c6e8
-Revises: c7d9e1f2a3b4
+Revises: f1a2b3c4d5e6
 Create Date: 2026-09-23 18:00:00.000000
 
 批 2/批 3 的 DDL：7 张新表 + 6 处新列（全部可空新增，向后兼容，不回填）。
 本文件只为**仓库一致性/未来新环境**；开发库没有 alembic_version 基线，
 实际落库走 `backend/scripts/apply_ddl.py`（幂等，见计划 §7 方案 A）。
 两份内容等价，若日后改动请同步修改。
+
+2026-10-09 补充：down_revision 由 `c7d9e1f2a3b4` 改为 `f1a2b3c4d5e6` ——
+本迁移要建 `job_match_records`，其外键指向 `profile_snapshots`，而那张表
+原先没有任何迁移创建它（只在 apply_ddl.py 里），导致全新库/OI 上必挂。
+现在由 `f1a2b3c4d5e6` 在本迁移之前把 `profile_snapshots` / `report_records` 建好。
 """
 from typing import Sequence, Union
 
@@ -16,7 +21,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision: str = 'b8d0f2a4c6e8'
-down_revision: Union[str, Sequence[str], None] = 'c7d9e1f2a3b4'
+down_revision: Union[str, Sequence[str], None] = 'f1a2b3c4d5e6'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

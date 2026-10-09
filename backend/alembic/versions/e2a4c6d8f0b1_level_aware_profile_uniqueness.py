@@ -29,7 +29,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision: str = 'e2a4c6d8f0b1'
-down_revision: Union[str, Sequence[str], None] = 'd1f2a3b4c5e6'
+down_revision: Union[str, Sequence[str], None] = 'c1d2e3f4a5b6'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -61,20 +61,38 @@ def upgrade() -> None:
 
     # ── 3) 唯一键换成 (title_key, level) ────────────────────────────────────
     # 旧索引必须先删：留着它，(title_key) 上的唯一约束会把"同名不同等级"的第二条顶回去。
-    op.drop_index('uq_job_profiles_title_key', table_name='job_profiles')
-    op.create_index(
-        'uq_job_profiles_title_level',
-        'job_profiles',
-        ['title_key', 'level'],
-        unique=True,
-    )
+    #
+    # 2026-10-09 修复：这两步加**存在性判断**。旧索引 `uq_job_profiles_title_key`
+    # 只在 apply_ddl.py / 老库里存在 —— **没有任何迁移创建过它**，所以全新库（CI）上
+    # `DROP INDEX` 直接抛 `index "uq_job_profiles_title_key" does not exist`，整条迁移链崩掉。
+    inspector = sa.inspect(op.get_bind())
+    index_names = {idx["name"] for idx in inspector.get_indexes("job_profiles")}
+    unique_names = {uq["name"] for uq in inspector.get_unique_constraints("job_profiles")}
+
+    if "uq_job_profiles_title_key" in index_names:
+        op.drop_index("uq_job_profiles_title_key", table_name="job_profiles")
+    elif "uq_job_profiles_title_key" in unique_names:
+        # 有的库里它是 UNIQUE 约束而不是裸索引，得按约束删
+        op.drop_constraint("uq_job_profiles_title_key", "job_profiles", type_="unique")
+
+    if "uq_job_profiles_title_level" not in index_names:
+        op.create_index(
+            'uq_job_profiles_title_level',
+            'job_profiles',
+            ['title_key', 'level'],
+            unique=True,
+        )
 
 
 def downgrade() -> None:
-    op.drop_index('uq_job_profiles_title_level', table_name='job_profiles')
-    op.create_index(
-        'uq_job_profiles_title_key', 'job_profiles', ['title_key'], unique=True
-    )
+    inspector = sa.inspect(op.get_bind())
+    index_names = {idx["name"] for idx in inspector.get_indexes("job_profiles")}
+    if "uq_job_profiles_title_level" in index_names:
+        op.drop_index('uq_job_profiles_title_level', table_name='job_profiles')
+    if "uq_job_profiles_title_key" not in index_names:
+        op.create_index(
+            'uq_job_profiles_title_key', 'job_profiles', ['title_key'], unique=True
+        )
 
     op.alter_column(
         'job_profiles', 'level', existing_type=sa.String(length=20), server_default=None
