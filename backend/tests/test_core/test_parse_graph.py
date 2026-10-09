@@ -1,7 +1,6 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from app.core.resume_agent.parse_graph import build_parse_graph
 from app.core.resume_agent.schemas import ParsedResume
 
@@ -19,7 +18,6 @@ def test_build_parse_graph_has_three_nodes():
 async def test_parse_dry_run_returns_layers_and_scores():
     from app.core.resume_agent.parse_graph import parse_resume_only
 
-    fake_five = {"intention": {"target_position": ["后端开发"]}}
     empty_dim = {"score": 4.2, "sub_dimensions": {}}
     fake_scores = {
         dim: empty_dim

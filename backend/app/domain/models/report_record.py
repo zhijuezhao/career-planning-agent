@@ -1,10 +1,14 @@
 from __future__ import annotations
+
 import uuid
 from datetime import datetime
+
 from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
+
 from app.infrastructure.database import Base
+
 
 class ReportRecord(Base):
     __tablename__ = "report_records"

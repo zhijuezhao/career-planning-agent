@@ -1,12 +1,15 @@
 from __future__ import annotations
+
 import uuid
 from datetime import datetime
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import UUID
+
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
 from app.infrastructure.database import Base
+
 
 class ProfileSnapshot(Base):
     __tablename__ = "profile_snapshots"
@@ -21,5 +24,12 @@ class ProfileSnapshot(Base):
     embedding: Mapped[list[float]] = mapped_column(Vector(1024), comment="画像向量，冻结于快照")
     serial_no: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), default=uuid.uuid4)
     description: Mapped[str] = mapped_column(String(255), default="")
-    matched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="匹配完成标记：NULL=尚未匹配，非空=匹配已完成（决策 #2，替代 description='matched' 字符串约定）")
+    matched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "匹配完成标记：NULL=尚未匹配，非空=匹配已完成"
+            "（决策 #2，替代 description='matched' 字符串约定）"
+        ),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

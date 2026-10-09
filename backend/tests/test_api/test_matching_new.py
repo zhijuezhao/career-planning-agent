@@ -116,11 +116,10 @@ def seed_snapshot(user_id: int) -> int:
     """
     import asyncio
 
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-    from sqlalchemy.pool import NullPool
-
     from app.config import get_settings
     from app.domain.models import ProfileSnapshot, StudentProfile
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
 
     async def _inner() -> int:
         engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
@@ -157,12 +156,11 @@ def matched_at_is_set(snapshot_id: int) -> bool:
     """Read matched_at back in a self-contained loop (R-5.4 verification)."""
     import asyncio
 
+    from app.config import get_settings
+    from app.domain.models import ProfileSnapshot
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.pool import NullPool
-
-    from app.config import get_settings
-    from app.domain.models import ProfileSnapshot
 
     async def _inner() -> bool:
         engine = create_async_engine(get_settings().database_url, poolclass=NullPool)

@@ -22,7 +22,6 @@ def _build_v1_router():
     outer = APIRouter()
     profile = importlib.import_module("app.api.v1.profile").router
     auth = importlib.import_module("app.api.v1.auth").router
-    from app.infrastructure.database import get_db  # resolve against real module
     outer.include_router(profile, prefix="", tags=["profile"])
     outer.include_router(auth, prefix="/auth", tags=["auth"])
     pkg.router = outer
@@ -48,7 +47,8 @@ _BUILD = None
 def app():
     from app.infrastructure.database import async_session_factory
 
-    v1 = _locked_v1_router()
+    # `_locked_v1_router()` 靠副作用替换 /api/v1 的 stub router，返回值不需要
+    _locked_v1_router()
     main = importlib.import_module("app.main")
     fastapi_app = main.create_app()
     # The stub router is already included by create_app under /api/v1; the

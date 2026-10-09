@@ -7,9 +7,8 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import text  # noqa: E402
-
 from app.infrastructure.database import async_session_factory  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
 BASE = "http://test"
 
@@ -26,7 +25,7 @@ async def main() -> None:
         r = await c.post("/api/v1/auth/login", json={"username": uname, "password": "Passw0rd!"})
         assert r.status_code == 200, f"login: {r.status_code} {r.text}"
         token = r.json()["access_token"]
-        H = {"Authorization": f"Bearer {token}"}
+        headers = {"Authorization": f"Bearer {token}"}
 
         other = {"Authorization": f"Bearer {'x' * 20}"}
 
@@ -34,17 +33,18 @@ async def main() -> None:
             # ---- T01: enumeration ----
             r = await c.get("/api/v1/users", headers=other)
             tr = ("student-list-forbidden", r.status_code)
-            r = await c.get("/api/v1/users", headers=H)  # authenticated student still denied
+            r = await c.get("/api/v1/users", headers=headers)  # authenticated student still denied
             tr = ("student-list-forbidden", tr[1], r.status_code)
-            r = await c.get(f"/api/v1/users/{uid}", headers=H)
+            r = await c.get(f"/api/v1/users/{uid}", headers=headers)
             t_self = ("self-detail", r.status_code)
-            r = await c.get("/api/v1/users/1", headers=H)
+            r = await c.get("/api/v1/users/1", headers=headers)
             t_other = ("other-detail-forbidden", r.status_code)
 
             # ---- T04: single MatchDetailResponse shape ----
             school = await db.execute(
                 text(
-                    "INSERT INTO ability_profiles (user_id, direction_tag, intention, traits, practice, soft_skills, hard_skills, version) "
+                    "INSERT INTO ability_profiles (user_id, direction_tag, intention, traits, practice, "
+                    "soft_skills, hard_skills, version) "
                     "VALUES (:uid, 'default', '{}', '{}', '{}', '{}', '{}', 1) RETURNING id"
                 ),
                 {"uid": uid},
@@ -57,7 +57,8 @@ async def main() -> None:
                     "INSERT INTO job_matches (user_id, profile_id, job_profile_id, match_score, match_analysis) "
                     "VALUES (:uid, :pid, :jid, 0.87, "
                     "'{\"vector_similarity\": 0.92, \"dimension_score\": 0.8, "
-                    "\"dimension_matches\": {\"skill\": {\"user_score\": 0.6, \"job_score\": 0.8, \"weight\": 0.5, \"match_ratio\": 0.75}}, "
+                    "\"dimension_matches\": {\"skill\": {\"user_score\": 0.6, \"job_score\": 0.8, "
+                    "\"weight\": 0.5, \"match_ratio\": 0.75}}, "
                     "\"weights_used\": {\"skill\": 0.5}}'::jsonb) RETURNING id"
                 ),
                 {"uid": uid, "pid": pid, "jid": jid},
@@ -66,14 +67,17 @@ async def main() -> None:
             await db.commit()
             mrow = (await db.execute(text("SELECT match_score FROM job_matches WHERE id=:mid"), {"mid": mid})).scalar()
 
-        r = await c.get(f"/api/v1/matching/results/{mid}", headers=H)
+        r = await c.get(f"/api/v1/matching/results/{mid}", headers=headers)
         body = r.json()
-        t04 = ("match-detail-shape", r.status_code, body.get("match_id"), body.get("job_profile_id"), body.get("match_score"), float(mrow))
+        t04 = (
+            "match-detail-shape", r.status_code, body.get("match_id"),
+            body.get("job_profile_id"), body.get("match_score"), float(mrow),
+        )
 
         # ---- T05: feedback ValueError -> 400 ----
         r = await c.post(
             "/api/v1/matching/feedback",
-            headers=H,
+            headers=headers,
             json={"match_id": 99999999, "feedback_type": "like"},
         )
         t05 = ("feedback-404->400", r.status_code)
@@ -82,7 +86,7 @@ async def main() -> None:
         async with async_session_factory() as db:
             await db.execute(text("UPDATE users SET status=0 WHERE id=:uid"), {"uid": uid})
             await db.commit()
-        r = await c.get("/api/v1/auth/me", headers=H)
+        r = await c.get("/api/v1/auth/me", headers=headers)
         t06 = ("disabled-token-403", r.status_code)
 
         for row in (tr, t_self, t_other, t04, t05, t06):
@@ -96,10 +100,10 @@ async def main() -> None:
             await db.execute(text("UPDATE users SET role='admin' WHERE id=:aid"), {"aid": aid})
             await db.commit()
         r = await c.post("/api/v1/auth/login", json={"username": admin, "password": "Passw0rd!"})
-        AH = {"Authorization": f"Bearer {r.json()['access_token']}"}
+        admin_headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
 
         files = {"file": ("..__..__..__evil_import.csv", b"name,desc\n", "text/csv")}
-        r = await c.post("/api/v1/admin/import/upload", headers=AH, files=files)
+        r = await c.post("/api/v1/admin/import/upload", headers=admin_headers, files=files)
         job_id = None
         if r.status_code == 201:
             job = r.json()

@@ -1,5 +1,6 @@
 from app.core.llm.prompts.profile_analysis import REPORT_GENERATION_SYSTEM_PROMPT, build_report_messages
 
+
 def test_prompt_has_six_modules():
     for mod in ("模块一 个人概况", "模块二 能力优势分析", "模块三 待提升领域",
                 "模块四 岗位匹配对比分析", "模块五 职业匹配建议", "模块六 成长路径建议"):

@@ -2,7 +2,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="旧表已删除（Task 1 删 AbilityProfile/CareerReport）；resume_service 引用已删模型，属死路径（旧 7-node 图已不运行），待对应任务清理")
+pytestmark = pytest.mark.skip(
+    reason="旧表已删除（Task 1 删 AbilityProfile/CareerReport）；resume_service 引用已删模型，"
+    "属死路径（旧 7-node 图已不运行），待对应任务清理"
+)
 
 try:
     from app.domain.services.resume_service import (

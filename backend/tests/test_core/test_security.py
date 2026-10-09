@@ -1,13 +1,12 @@
 """Tests for infrastructure/security.py — JWT and password hashing."""
 
-import pytest
-from datetime import timedelta, timezone, datetime
+from datetime import datetime, timedelta, timezone
 
 from app.infrastructure.security import (
-    hash_password,
-    verify_password,
     create_access_token,
     decode_access_token,
+    hash_password,
+    verify_password,
 )
 
 

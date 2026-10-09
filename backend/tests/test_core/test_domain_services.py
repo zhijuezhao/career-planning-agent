@@ -1,26 +1,36 @@
-"""Tests for domain/services/ — chat_service and matching_service."""
+# ruff: noqa: F821
+"""Tests for domain/services/ — chat_service and matching_service.
+
+本模块**整体 skip**：旧表（MatchResult / UserFeedback）已删除，对应的
+`get_user_vector` / `get_match_history` / `create_feedback` / `get_user_feedbacks`
+四个符号已随表一起删掉。保留这些用例仅作历史记录，所以引用未定义名不报错
+（文件级 `# ruff: noqa: F821`）。要恢复它们需先恢复相应 service 函数。
+"""
 
 import asyncio
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-
-pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6；matching_service 仅存 run_matching，历史符号已删")
-
 from app.domain.services.chat_service import (
     create_chat_session,
-    list_chat_sessions,
-    get_chat_session,
     delete_chat_session,
     get_chat_messages,
+    get_chat_session,
+    list_chat_sessions,
     save_chat_message,
 )
+
 try:
     from app.schemas.matching import FeedbackCreateRequest
 except ImportError:  # pragma: no cover
     FeedbackCreateRequest = None
+
+# pytestmark 放在全部 import 之后（否则 E402）
+pytestmark = pytest.mark.skip(
+    reason="旧表已删除，新端点待 Task 5/6；matching_service 仅存 run_matching，历史符号已删"
+)
 
 
 def asyncio_run(coro):

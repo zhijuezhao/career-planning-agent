@@ -35,12 +35,19 @@ apscheduler = "^3.10.4"
 # Utilities
 pydantic = "^2.9.0"
 pydantic-settings = "^2.6.0"
+# `app/schemas/user.py` 用了 `EmailStr` → pydantic 需要 email-validator，
+# 否则 import 阶段直接 ImportError（2026-10-09 审计：此前只写在 CI 的临时 pip 列表里，
+# 项目自身依赖清单漏了，别人 clone 下来装不起来）。
+email-validator = "^2.2.0"
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
 python-multipart = "^0.0.12"
 loguru = "^0.7.2"
 httpx = "^0.27.0"
 beautifulsoup4 = "^4.12.0"
+# `app/core/link_enrich/extract.py` 直接 `from lxml import html`（XPath 提取），
+# 它是直接依赖而非可选传递依赖，必须显式声明。
+lxml = "^5.3.0"
 pdfplumber = "^0.11.4"
 python-docx = "^1.1.0"
 pandas = "^2.1.4"

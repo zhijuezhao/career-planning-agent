@@ -1,11 +1,7 @@
 """Tests for utils/file_storage.py — file hash and upload storage."""
 
-import os
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from app.utils.file_storage import compute_file_hash, save_upload_file
 

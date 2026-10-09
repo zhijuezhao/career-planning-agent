@@ -5,9 +5,9 @@ Offline (no DB): the per-hit loop makes MULTIPLE session.execute calls
 side_effect list instead of one shared MagicMock.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from app.core.matching import match_user_to_jobs
 from app.domain.models.profile_snapshot import ProfileSnapshot
 

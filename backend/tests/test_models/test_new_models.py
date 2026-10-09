@@ -1,9 +1,7 @@
-import pytest
-from sqlalchemy import inspect
 
-from app.domain.models import ProfileSnapshot, ReportRecord, StudentProfile
-from app.domain.models.user import User
+from app.domain.models import ProfileSnapshot, StudentProfile
 from app.domain.models.resume import Resume
+from app.domain.models.user import User
 
 
 def test_new_tables_registered_on_base():

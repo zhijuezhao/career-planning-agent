@@ -1,14 +1,12 @@
 """Tests for core/llm/models.py — LLM provider config and adapter factory."""
 
-import pytest
-from pydantic import SecretStr
-
+from app.config import Settings
 from app.core.llm.models import (
     LLMProviderConfig,
     build_provider_configs,
     create_chat_model,
 )
-from app.config import Settings
+from pydantic import SecretStr
 
 
 class TestLLMProviderConfig:

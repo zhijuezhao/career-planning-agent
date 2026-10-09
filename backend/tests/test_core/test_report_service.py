@@ -3,8 +3,6 @@ import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6")
-
 from app.domain.services.report_service import (
     _safe_json_loads,
     generate_word_document,
@@ -14,10 +12,14 @@ from app.domain.services.report_service import (
     get_latest_match_results,
     get_user_profile_data,
 )
+
 try:
     from app.domain.services.report_service import generate_report_content
 except ImportError:  # pragma: no cover
     generate_report_content = None
+
+# pytestmark 必须放在全部 import 之后（否则 E402）；本模块整表已删，用例整体 skip
+pytestmark = pytest.mark.skip(reason="旧表已删除，新端点待 Task 5/6")
 
 
 class TestSafeJsonLoads:
