@@ -564,7 +564,11 @@ async def match_user_to_jobs(
         List of match results sorted by score (descending). No DB writes.
     """
     user_vector = snapshot.embedding
-    if not user_vector or all(v == 0.0 for v in user_vector):
+    # ⚠ 不能用 `not user_vector`：pgvector 从库里读出来的是 **numpy 数组**（装了 numpy 时），
+    #    对多元素数组做真值判断会抛 ValueError: The truth value of an array with more than
+    #    one element is ambiguous（2026-10-09 CI 实测：Ubuntu 上这条用例必挂，
+    #    Windows 本地因为拿到的是 list 才没暴露）。显式判 None / 长度。
+    if user_vector is None or len(user_vector) == 0 or all(v == 0.0 for v in user_vector):
         # R-5.6: all-zero vector (embedding fallback) is treated as no-match;
         # a null vector would otherwise rank NaN on the populated embedding table.
         return []
@@ -595,7 +599,8 @@ async def match_user_to_jobs_detailed(
     保留 `match_user_to_jobs` 的旧签名与返回值不变，避免影响既有调用点与测试。
     """
     user_vector = snapshot.embedding
-    if not user_vector or all(v == 0.0 for v in user_vector):
+    # 同 `match_user_to_jobs`：pgvector 可能给出 numpy 数组，真值判断会抛 ValueError
+    if user_vector is None or len(user_vector) == 0 or all(v == 0.0 for v in user_vector):
         return [], []
 
     own_session = session is None
