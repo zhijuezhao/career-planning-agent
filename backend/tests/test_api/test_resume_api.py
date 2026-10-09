@@ -4,6 +4,9 @@ import pytest
 from app.main import app
 from fastapi.testclient import TestClient
 
+# 同 test_resume.py：CI 无 LLM key，解析链路用 conftest 的离线替身。
+pytestmark = pytest.mark.usefixtures("offline_resume_parser", "offline_report_llm")
+
 _ts = str(int(time.time()))
 
 

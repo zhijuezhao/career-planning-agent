@@ -4,6 +4,10 @@ import pytest
 from app.main import app
 from fastapi.testclient import TestClient
 
+# 本模块要走「上传 → 解析落库」链路，而 CI 没有任何 LLM key：
+# 用 conftest 的确定性替身（零网络、零计费）替换解析 LLM，见 offline_resume_parser 注释。
+pytestmark = pytest.mark.usefixtures("offline_resume_parser")
+
 _ts = str(int(time.time()))
 
 MINIMAL_PDF = b"""\

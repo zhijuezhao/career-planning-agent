@@ -91,7 +91,9 @@ async def create_profile_snapshot(user_id: int, db: AsyncSession) -> ProfileSnap
     if text.strip():
         try:
             vec = await get_embeddings().aembed_query(text)
-            if not vec:
+            # 不能写 `if not vec`：embedding 可能是 numpy 数组，多元素数组真值判断会抛
+            # ValueError（2026-10-09 CI 实测；pgvector/langchain 版本不同会给出 list 或 ndarray）
+            if vec is None or len(vec) == 0:
                 vec = _ZERO_EMBEDDING
         except Exception:  # embedding 服务故障 → 零向量，绝不 fail 快照
             logger.exception("embedding failed, using zero vector | user_id=%s", user_id)

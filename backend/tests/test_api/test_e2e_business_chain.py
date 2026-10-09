@@ -31,6 +31,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from starlette.testclient import TestClient
 
+# 报告生成链路也要 LLM，而 CI 无任何 key → 用 conftest 的确定性替身
+# （本文件自己的 offline_llm 只替了「解析 LLM + 快照 embedding」）
+pytestmark = pytest.mark.usefixtures("offline_report_llm")
+
 #: 极简但**合法**的 PDF（`%PDF` magic + 可被 pdf 提取器打开），沿用 test_resume_api 里的字节。
 MINIMAL_PDF = b"""\
 %PDF-1.0

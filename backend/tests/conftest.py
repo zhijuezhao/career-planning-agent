@@ -1,6 +1,7 @@
 import asyncio
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -36,7 +37,15 @@ app.dependency_overrides[get_db] = override_get_db
 
 @pytest.fixture(scope="module")
 def client():
-    return TestClient(app)
+    """模块级 TestClient。
+
+    ⚠ 必须用 `with`（2026-10-09 CI 修复）：只有上下文管理器里 TestClient 才复用
+    **同一个事件循环**；否则每个请求各起一个 loop，而 app 的池化 asyncpg 连接会被
+    跨 loop 复用 → teardown 报
+    `got Future ... attached to a different loop`（Linux CI 与 Windows 实测都会）。
+    """
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 @pytest.fixture(scope="module")
@@ -284,3 +293,61 @@ def ensure_job_vectors():
     created = asyncio.run(seed_job_vectors_if_missing())
     yield
     asyncio.run(drop_seeded_job_vectors(created))
+
+
+# ── 「离线 LLM」替身 ───────────────────────────────────────────────────────────
+# 背景（2026-10-09 CI 修复）：公开仓库的 CI **没有任何 LLM key**（也不该有），
+# 而简历解析 / 报告生成这两条链路会直接调 LLM 网关 → 空配置时抛
+# `LLMGatewayError: No LLM providers configured`，接口 500、用例全红。
+# 这两条链路的**契约**（上传→解析落库、报告生成→落库/下载）与模型输出内容无关，
+# 所以统一用确定性替身：零网络、零计费、可复现。
+# （开发库里有真 key，所以本地一直看不出来 —— 这正是"CI 才暴露"的那类问题。）
+
+#: 简历解析 LLM 的确定性产出（须能通过 `ParsedResume.model_validate`）
+FAKE_PARSED_RESUME: dict = {
+    "basic_info": {"name": "张三", "degree": "本科", "major": "计算机科学与技术"},
+    "intention": {"target_position": ["后端工程师"], "target_city": ["北京"]},
+    "hard_skills": {"tags": ["Java", "MySQL"], "certificates": ["CET-6"]},
+    "dimension_scoring": {
+        "profile_type": "candidate",
+        "total_dim_score": 3.5,
+        "dimensions": {
+            "专业技术能力": {"score": 4.0, "sub_dimensions": {"编程": 4.0}},
+            "实践经验背景": {"score": 3.0, "sub_dimensions": {"实习": 3.0}},
+            "通用软素质": {"score": 3.5, "sub_dimensions": {"沟通": 3.5}},
+            "职业匹配度": {"score": 3.0, "sub_dimensions": {"意向": 3.0}},
+            "成长潜力": {"score": 3.5, "sub_dimensions": {"学习": 3.5}},
+            "基础资质条件": {"score": 4.0, "sub_dimensions": {"学历": 4.0}},
+        },
+    },
+}
+
+#: 报告生成 LLM 的确定性产出（Markdown 正文）
+FAKE_REPORT_TEXT = (
+    "## 模块一 个人概况\n张三，本科，计算机科学与技术。\n\n"
+    "## 模块二 能力优势分析\n具备扎实的编程基础。\n\n"
+    "## 模块六 成长路径建议\n短期补齐工程实践，中期深入分布式系统。\n"
+)
+
+
+@pytest.fixture(scope="module")
+def offline_resume_parser():
+    """把简历解析 LLM 换成确定性替身（测试模块级用 `usefixtures` 引入）。"""
+    from app.core.resume_agent.tools import resume_parser
+
+    with patch.object(
+        resume_parser, "_parse_resume", new=AsyncMock(return_value=FAKE_PARSED_RESUME)
+    ):
+        yield
+
+
+@pytest.fixture(scope="module")
+def offline_report_llm():
+    """把报告生成 LLM 换成确定性替身（`report_builder` 里 `get_llm_gateway` 是模块级名字）。"""
+    from app.core.resume_agent.tools import report_builder
+
+    fake_response = SimpleNamespace(content=FAKE_REPORT_TEXT)
+    fake_gateway = SimpleNamespace(ainvoke=AsyncMock(return_value=fake_response))
+
+    with patch.object(report_builder, "get_llm_gateway", lambda: fake_gateway):
+        yield

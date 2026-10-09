@@ -145,5 +145,7 @@ async def snapshot_detail(
         form=snap.form_raw_json,
         five_layers=snap.five_layers_json,
         dimension_scores=snap.six_dim_scores_json,
-        has_embedding=bool(snap.embedding),
+        # 不能用 `bool(snap.embedding)`：pgvector 给出的是 numpy 数组，
+        # 多元素数组真值判断会抛 ValueError（2026-10-09 CI 实测）
+        has_embedding=snap.embedding is not None and len(snap.embedding) > 0,
     )
