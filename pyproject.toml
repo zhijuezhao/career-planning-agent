@@ -23,8 +23,13 @@ langgraph = ">=0.2,<0.3"
 langsmith = ">=0.1,<0.2"
 
 # Database
-sqlalchemy = "^2.0.35"
-asyncpg = "^0.29.0"
+# ⚠ `[asyncio]` extra 不能省：SQLAlchemy 2.1 起**不再自动安装 greenlet**，
+#    而 `sqlalchemy.ext.asyncio` 没有 greenlet 会直接 ImportError
+#    （2026-10-09 CI 实测：alembic env.py 导入即挂，整条迁移链跑不起来）。
+#    同时把上界收到 `<2.1`：本项目/测试是在 2.0.x 上开发验证的，升 2.1 应单独做一遍回归。
+sqlalchemy = {extras = ["asyncio"], version = ">=2.0.35,<2.1"}
+# 允许 0.31（本地验证组合）；`^0.29.0` 会锁死到 0.29.x，与开发环境不一致
+asyncpg = ">=0.29.0,<0.32"
 alembic = "^1.13.0"
 pgvector = "^0.3.0"
 
@@ -41,6 +46,9 @@ pydantic-settings = "^2.6.0"
 email-validator = "^2.2.0"
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+# passlib 1.7.4 与 bcrypt 5.x 不兼容（读 `bcrypt.__about__` 失败），
+# 这里显式钉在 4.0.x —— 与开发环境一致，也避免 CI 装到 5.x 才炸。
+bcrypt = ">=4.0.1,<4.1"
 python-multipart = "^0.0.12"
 loguru = "^0.7.2"
 httpx = "^0.27.0"
