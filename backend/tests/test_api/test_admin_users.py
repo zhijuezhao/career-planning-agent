@@ -93,7 +93,8 @@ class TestUsersAPI:
         user_id = _create_user(client, uname)
 
         resp = client.post(
-            f"/api/v1/admin/users/{user_id}/reset-password?new_password=newpass123",
+            f"/api/v1/admin/users/{user_id}/reset-password",
+            json={"new_password": "newpass123"},
             headers={"Authorization": f"Bearer {admin_token}"},
         )
         assert resp.status_code == 200

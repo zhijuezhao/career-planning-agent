@@ -50,6 +50,24 @@ logs/
 *.key
 *.cert
 
+# ── 2026-10-09 安全审计：上面这些模式**只匹配构建上下文根目录** ──────────────
+# Docker 官方规则：不带 `**` 的模式按 Go filepath.Match 匹配，
+# "markdown files under subdirectories are still included"
+# （https://docs.docker.com/build/concepts/context/）。
+# 而后端构建上下文是仓库根、`Dockerfile.backend` 执行 `COPY backend/ /app/backend/`
+# → `backend/.env`、`backend/uploads/`（真实用户简历）、`backend/output/`（用户报告）、
+# `backend/logs/` 全都会被打进镜像层。必须显式用 `**` 兜住子目录。
+**/.env
+**/.env.*
+**/uploads/
+**/output/
+**/logs/
+**/*.pem
+**/*.key
+backups/
+.verify-src/
+.dsh-tmp/
+
 # Documentation
 *.md
 docs/

@@ -23,6 +23,7 @@ from app.schemas.admin import (
     AdminUserResponse,
     AdminUserStats,
     AdminUserUpdate,
+    ResetPasswordRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -250,16 +251,20 @@ async def update_user(
 @router.post("/{user_id}/reset-password", response_model=AdminUserResponse)
 async def reset_password(
     user_id: int,
-    new_password: str = Query(..., min_length=6, max_length=128),
+    payload: ResetPasswordRequest,
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Reset a user's password."""
+    """Reset a user's password.
+
+    密码走**请求体**而非 query（审计 P1-5）：nginx / uvicorn 的访问日志会记录
+    query string，明文密码会跟着进日志文件。
+    """
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user.password_hash = hash_password(new_password)
+    user.password_hash = hash_password(payload.new_password)
     await db.flush()
     await db.refresh(user)
     return user

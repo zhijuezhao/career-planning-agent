@@ -1,10 +1,16 @@
 name: CI
 
+# 2026-10-09 安全审计 M-1：这里原先只监听 main/develop，而仓库默认分支是 **master**
+# → 工作流从未触发过（GitHub Actions 页面"This repository has no workflow runs yet"）。
 on:
   push:
-    branches: [main, develop]
+    branches: [master, main, develop]
   pull_request:
-    branches: [main]
+    branches: [master, main]
+
+# 最小权限：CI 只需要读代码（原先未声明，默认 token 权限可能可写）
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -58,16 +64,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install fastapi uvicorn sse-starlette \
-            pydantic pydantic-settings email-validator \
-            sqlalchemy asyncpg alembic pgvector \
-            redis apscheduler \
-            python-jose[cryptography] passlib[bcrypt]==4.0.1 \
-            python-multipart loguru httpx \
-            pypdf2 python-docx pandas openpyxl \
-            langchain langchain-core langchain-community langchain-openai \
-            langgraph langsmith \
-            pytest pytest-asyncio pytest-cov
+          # 2026-10-09 安全审计 M-2：原先这里手写一份 pip 列表，与 pyproject.toml 漂移
+          # （缺 pdfplumber / beautifulsoup4 / xlrd，反而多装 pypdf2）→ 改成以
+          # pyproject.toml 为唯一来源，再补测试期依赖。
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest pytest-asyncio pytest-cov
 
       - name: Run database migrations
         working-directory: backend

@@ -21,13 +21,15 @@
 用法
 ----
     # 容器内（唯一支持的方式：脚本 import app.*）
-    docker exec -e PYTHONPATH=/app/backend -e PYTHONIOENCODING=utf-8 -w /app/backend \
+    # 口令必须从环境变量传入（脚本不再内置任何默认口令，见 2026-10-09 安全审计 P0-2）
+    docker exec -e PYTHONPATH=/app/backend -e PYTHONIOENCODING=utf-8 \
+        -e ACCEPTANCE_ADMIN_PASSWORD='<管理员口令>' -w /app/backend \
         career_backend python scripts/acceptance_multimany_geo.py
 
     # 保留现场排查（不清理）
     ... python scripts/acceptance_multimany_geo.py --keep
 
-退出码：0 = 全通过；1 = 有失败项（CI/人工都能直接用）。
+退出码：0 = 全通过；1 = 有失败项；2 = 未提供管理员口令。
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -376,10 +379,29 @@ async def run_checks(base: str, username: str, password: str, keep: bool) -> int
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="任务 5 真栈验收（多对多 + 省市级联）")
     parser.add_argument("--base-url", default="http://localhost:8001", help="容器内后端地址")
-    parser.add_argument("--username", default="s7admin")
-    parser.add_argument("--password", default="***REMOVED-LEAKED-CREDENTIAL***")  # 开发库账号，见交接文档
+    # 2026-10-09 安全审计 P0-2：这里原先硬编码了开发库管理员账号与口令，
+    # 等于把凭据公开在 GitHub 上（且仓库历史里清不掉）。
+    # 现在不提供任何默认口令：口令只能从命令行或环境变量传入。
+    # ⚠ 已被泄露的那把口令请务必轮换或直接删号（见安全审计报告）。
+    parser.add_argument(
+        "--username",
+        default=os.environ.get("ACCEPTANCE_ADMIN_USERNAME", "s7admin"),
+        help="管理员账号（默认取环境变量 ACCEPTANCE_ADMIN_USERNAME，再回退 s7admin）",
+    )
+    parser.add_argument(
+        "--password",
+        default=os.environ.get("ACCEPTANCE_ADMIN_PASSWORD", ""),
+        help="管理员口令；请用环境变量 ACCEPTANCE_ADMIN_PASSWORD 传入，不要写在代码/文档里",
+    )
     parser.add_argument("--keep", action="store_true", help="保留测试数据，便于排查")
     args = parser.parse_args(argv)
+    if not args.password:
+        print(
+            "[FAIL] 缺少管理员口令：请设置环境变量 ACCEPTANCE_ADMIN_PASSWORD "
+            "或显式传 --password（脚本不再内置任何默认口令）",
+            file=sys.stderr,
+        )
+        return 2
     try:
         return asyncio.run(run_checks(args.base_url, args.username, args.password, args.keep))
     except Exception as exc:  # noqa: BLE001 - CLI 入口，给出可读信息

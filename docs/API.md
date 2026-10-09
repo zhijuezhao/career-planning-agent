@@ -320,7 +320,7 @@ GET    /api/v1/admin/users              // 用户列表
 GET    /api/v1/admin/users/{user_id}    // 用户详情
 GET    /api/v1/admin/users/{user_id}/stats // 用户统计
 PUT    /api/v1/admin/users/{user_id}    // 更新用户
-POST   /api/v1/admin/users/{user_id}/reset-password // 重置密码
+POST   /api/v1/admin/users/{user_id}/reset-password // 重置密码（body: {"new_password": "..."}）
 DELETE /api/v1/admin/users/{user_id}    // 删除用户
 ```
 

@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from loguru import logger
 
@@ -16,15 +17,20 @@ def setup_logging():
         "<level>{message}</level>"
     )
 
+    # `LOG_LEVEL` 留空 = 历史行为（开发 DEBUG / 生产 INFO）；
+    # `LOG_FILE` 只取目录，文件名仍按天轮转（2026-10-09 审计：原先 LOG_LEVEL 配了不生效）。
+    level = settings.log_level.strip().upper() or ("DEBUG" if settings.is_development else "INFO")
+    log_dir = Path(settings.log_file).parent
+
     logger.add(
         sys.stderr,
         format=log_format,
-        level="DEBUG" if settings.is_development else "INFO",
+        level=level,
         colorize=True,
     )
 
     logger.add(
-        "logs/app_{time:YYYY-MM-DD}.log",
+        f"{log_dir}/app_{{time:YYYY-MM-DD}}.log",
         format=log_format,
         level="INFO",
         rotation="00:00",
@@ -35,7 +41,7 @@ def setup_logging():
 
     if not settings.is_development:
         logger.add(
-            "logs/error_{time:YYYY-MM-DD}.log",
+            f"{log_dir}/error_{{time:YYYY-MM-DD}}.log",
             format=log_format,
             level="ERROR",
             rotation="00:00",

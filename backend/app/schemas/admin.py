@@ -51,6 +51,20 @@ class AdminUserUpdate(BaseModel):
         return value
 
 
+class ResetPasswordRequest(BaseModel):
+    """管理员重置密码的请求体（2026-10-09 安全审计 P1-5）。
+
+    此前 `new_password` 是 **Query 参数**，而 nginx 的 `log_format` 里有 `"$request"`
+    （含 query string）→ 新密码会被明文写进 access.log。改走请求体后不再进日志。
+
+    仍保留 `extra="forbid"`：传错字段直接 422，避免"发了却没生效"。
+    """
+
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+    model_config = {"extra": "forbid"}
+
+
 class AdminUserListResponse(BaseModel):
     total: int
     items: list[AdminUserResponse]

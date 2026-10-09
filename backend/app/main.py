@@ -24,7 +24,8 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:5174"],
+        # 开发默认来源 + `CORS_ORIGINS`（此前硬编码 localhost，配置里的域名永远不生效）
+        allow_origins=settings.cors_origin_list,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

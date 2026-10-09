@@ -20,6 +20,11 @@ env/
 
 # Environment
 .env
+# 2026-10-09 安全审计：`.env` 只挡住这一个文件名，`.env.production` / `.env.local`
+# 之类的变体一个都挡不住（check-ignore 实测）。下面用通配兜住，再放行 example。
+.env.*
+!.env.example
+!.env.production.example
 
 # Uploads
 uploads/
@@ -53,9 +58,50 @@ backend/output/
 # 临时调试目录（.dsh-tmp）与 ruff 缓存
 .dsh-tmp/
 .ruff_cache/
+# 本地 AI 工具目录 / 过程文档：可能含本机绝对路径（C:\Users\<用户名>\...）与内部交接内容。
+# 原先只靠**本机全局** gitignore 兜着（换机器、换人就失效），这里写进仓库规则。
+.claude/
+.trae/
+.superpowers/
 # TS 增量构建产物
 *.tsbuildinfo
 # nginx TLS 私钥/证书（即使目录暂时为空，未来放证书时也绝不入库）
 nginx/ssl/
+# 私钥 / 证书 / 备份 SQL：任何位置都不入库（2026-10-09 安全审计补）
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.dump
+*.sql.gz
+*.sql.bak
+# 根目录随手导出的 SQL（不含 scripts/init-db.sql 这类入库初始化脚本）
+/*.sql
 # 前端 node_modules 兜底（子目录已有各自 .gitignore）
 node_modules/
+
+# === 内部设计 / 交接 / 复盘文档：**只在本机保留，绝不入库**（2026-10-09 用户要求）===
+# 说明：这些文档是项目内部资料（含库内数据规模、旧管理员口令线索、内部安全评审等），
+# 公开仓库里不能出现；但**文件本身保留在原路径**，本规则只阻止 git 跟踪，
+# 不会删除任何本地文件（`git clean` 才是删文件的命令，本项目任何流程都不用它）。
+# 备份由提交前的 scripts/check-publish-safety.ps1 兜底检查。
+docs/HANDOFF-*.md
+docs/superpowers/
+docs/人岗匹配统一评分标准*.md
+docs/岗位匹配统一评分标准*.md
+docs/商业化落地复盘报告-*.md
+docs/行业分析岗位复查报告-*.md
+docs/岗位数据设计文档.md
+docs/简历数据设计文档.md
+docs/简历解析模块设计文档.md
+docs/知识库模块设计文档.md
+docs/本地运行启动说明.md
+docs/本地运行自动说明.md
+/前端开发规划报告.md
+/开发实施文档.md
+/综合项目规划文档_修改版.md
+/项目开发文档.md
+# 若以后想把这类文档集中到一处，用这个目录（同样只在本机）
+/docs-internal/

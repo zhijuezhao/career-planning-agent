@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -17,6 +18,14 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
+
+    # 部署变量（由 docker-compose / 运维注入，应用自身不消费；声明出来是为了
+    # 让 `.env` 能通过 pydantic-settings 的 extra="forbid" 校验 —— 否则整份
+    # `.env` 会直接 ValidationError、后端启动失败）
+    postgres_db: str = "career_planning"
+    postgres_user: str = "postgres"
+    postgres_password: str = ""
+    redis_password: str = ""
 
     # JWT
     jwt_secret_key: str = "change-me-to-a-random-secret-key-in-production"
@@ -43,6 +52,10 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_base_url: str = ""
     embedding_model: str = ""
+
+    # Embedding - 阿里云百炼（DASHSCOPE_*：与 EMBEDDING_* 二选一，走同一 provider 配置）
+    dashscope_api_key: str = ""
+    qwen_embedding_model: str = ""
 
     # Embedding - SiliconFlow（兼容回退）
     siliconflow_api_key: str = ""
@@ -140,6 +153,49 @@ class Settings(BaseSettings):
     # Web search - Tavily
     tavily_api_key: str = ""
     tavily_base_url: str = "https://api.tavily.com"
+
+    # HTTP / 日志（`.env.production.example` 里已文档化，这里必须真实接线，
+    # 否则"配了却不生效"；见 2026-10-09 安全审计 M-6）
+    #: 允许的跨域来源（逗号分隔）；**追加**在本地开发默认来源之后，不会挤掉 dev 前端
+    cors_origins: str = ""
+    #: 预留：当前版本未接线 TrustedHostMiddleware，设置它不会生效
+    allowed_hosts: str = ""
+    #: 留空 = 开发 DEBUG / 生产 INFO（与历史行为一致）
+    log_level: str = ""
+    #: 文件日志基名（按天轮转：`logs/app_YYYY-MM-DD.log`）
+    log_file: str = "./logs/app.log"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """开发默认来源 + `CORS_ORIGINS` 配置（去空、去重、保序）。"""
+        defaults = ["http://localhost:5173", "http://localhost:3000", "http://localhost:5174"]
+        configured = [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+        merged: list[str] = []
+        for origin in [*defaults, *configured]:
+            if origin not in merged:
+                merged.append(origin)
+        return merged
+
+    @model_validator(mode="after")
+    def _guard_production_jwt_secret(self) -> "Settings":
+        """生产环境禁止用占位符/弱密钥启动。
+
+        背景（2026-10-09 安全审计 P1-4）：`jwt_secret_key` 的默认值是公开的
+        `change-me-...`；`.env` 一旦漏配，任何人都能用这个公开密钥伪造 admin token。
+        所以生产直接**拒绝启动**（fail closed），而不是打条日志继续跑。
+        """
+        if self.app_env.strip().lower() not in {"production", "prod"}:
+            return self
+
+        secret = self.jwt_secret_key.strip()
+        placeholder_markers = ("change", "your", "secret_key", "placeholder", "example")
+        looks_placeholder = any(marker in secret.lower() for marker in placeholder_markers)
+        if len(secret) < 32 or looks_placeholder:
+            raise ValueError(
+                "JWT_SECRET_KEY 未设置或仍是占位符/弱密钥，拒绝以 production 启动。"
+                "请生成强随机值后写入 .env：openssl rand -hex 32"
+            )
+        return self
 
     @property
     def is_development(self) -> bool:

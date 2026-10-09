@@ -3,7 +3,9 @@
 import os
 from unittest.mock import patch
 
+import pytest
 from app.config import Settings, get_settings
+from pydantic import ValidationError
 
 
 class TestSettingsDefaults:
@@ -54,7 +56,8 @@ class TestSettingsProperties:
         assert settings.is_development is True
 
     def test_is_development_false(self):
-        settings = Settings(app_env="production")
+        # production 必须有强随机 JWT 密钥，否则 Settings 拒绝构造（见 TestProductionJwtGuard）
+        settings = Settings(app_env="production", jwt_secret_key="a" * 64)
         assert settings.is_development is False
 
     def test_max_upload_size_bytes(self):
@@ -138,3 +141,76 @@ class TestLLMSettings:
     def test_default_llm_max_tokens(self):
         settings = Settings(_env_file=None)
         assert settings.llm_max_tokens == 4096
+
+
+class TestProductionJwtGuard:
+    """生产环境弱/占位 JWT 密钥必须 fail closed（2026-10-09 安全审计 P1-4）。"""
+
+    def test_production_with_placeholder_secret_rejected(self):
+        with pytest.raises(ValidationError):
+            Settings(
+                app_env="production",
+                jwt_secret_key="change-me-to-a-random-secret-key-in-production",
+            )
+
+    def test_production_with_uppercase_placeholder_rejected(self):
+        with pytest.raises(ValidationError):
+            Settings(
+                app_env="production",
+                jwt_secret_key="CHANGE_ME_GENERATE_WITH_OPENSSL_RAND_HEX_32",
+            )
+
+    def test_production_with_short_secret_rejected(self):
+        with pytest.raises(ValidationError):
+            Settings(app_env="production", jwt_secret_key="short-secret")
+
+    def test_production_with_strong_secret_ok(self):
+        secret = "b" * 64
+        settings = Settings(app_env="production", jwt_secret_key=secret)
+        assert settings.jwt_secret_key == secret
+
+    def test_development_still_allows_placeholder(self):
+        settings = Settings(app_env="development")
+        assert settings.jwt_secret_key
+
+
+class TestCorsOrigins:
+    """`CORS_ORIGINS` 必须真正生效，且不能挤掉本地开发来源（审计 M-6）。"""
+
+    def test_defaults_include_dev_frontends(self):
+        origins = Settings(_env_file=None, cors_origins="").cors_origin_list
+        assert "http://localhost:5173" in origins
+
+    def test_configured_origins_appended_and_deduped(self):
+        origins = Settings(
+            _env_file=None,
+            cors_origins="https://a.com, http://localhost:5173",
+        ).cors_origin_list
+        assert "https://a.com" in origins
+        assert origins.count("http://localhost:5173") == 1
+        assert "" not in origins
+
+
+class TestDeploymentVarsAccepted:
+    """docker-compose / .env.production.example 注入的变量必须能被 Settings 接受。
+
+    否则整份 `.env` 会触发 pydantic-settings 的 `extra_forbidden`，
+    后端**直接启动失败**（2026-10-09 安全审计发现的实际故障）。
+    """
+
+    def test_compose_only_vars_do_not_break_settings(self):
+        settings = Settings(
+            _env_file=None,
+            postgres_db="career_planning",
+            postgres_user="postgres",
+            postgres_password="CHANGE_ME",
+            redis_password="CHANGE_ME",
+            dashscope_api_key="sk-ws-placeholder",
+            qwen_embedding_model="qwen3-vl-embedding",
+            cors_origins="https://yourdomain.com",
+            log_level="INFO",
+            log_file="./logs/app.log",
+            allowed_hosts="yourdomain.com",
+        )
+        assert settings.postgres_db == "career_planning"
+        assert settings.log_level == "INFO"
