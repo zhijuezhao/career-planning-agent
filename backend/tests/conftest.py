@@ -3,11 +3,11 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import app.infrastructure.database as app_db
 import pytest
 import pytest_asyncio
 from app.config import get_settings
 from app.infrastructure.database import get_db
-from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -20,6 +20,21 @@ test_engine = create_async_engine(
     poolclass=NullPool,
 )
 test_session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+
+# ── ⚠ 必须在 `import app.main` 之前替换应用侧的引擎/工厂（2026-10-09 CI 修复）──────
+# 生产代码的 `async_session_factory` 是**池化**的（pool_size=20）。测试里有很多
+# `asyncio.run(...)` 辅助函数、后台任务与工具类各自在**临时事件循环**里取 session，
+# 池化的连接会被跨 loop 复用 —— 典型报错：
+#   RuntimeError: ... got Future ... attached to a different loop
+#   （CI 实测：tests/test_core/test_score_deriver.py::test_tool_ainvoke_writes_to_db）
+# 在 app.main 导入**之前**把模块属性换成 NullPool 版本，这样**所有**
+# `from app.infrastructure.database import async_session_factory`（模块级导入，如
+# job_matcher / report_service / score_deriver）拿到的都是每连接一个 session 的版本，
+# 与事件循环再无耦合。仅测试期生效，不改生产行为。
+app_db.engine = test_engine
+app_db.async_session_factory = test_session_factory
+
+from app.main import app  # noqa: E402  （必须在上面替换之后导入，故不在文件顶部）
 
 
 async def override_get_db():
